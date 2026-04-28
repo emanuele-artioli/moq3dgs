@@ -1,0 +1,17 @@
+name: 3dgs_moq
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  # 1. Conda handles the massive system-level GPU/ML binaries
+  - pytorch=2.5.1=py3.10_cuda12.1_cudnn9.1.0_0
+  - torchvision=0.20.1=py310_cu121
+  - torchaudio=2.5.1=py310_cu121
+  - pytorch-cuda=12.1
+  - pip:
+      # 2. Pip reads pyproject.toml and installs everything else!
+      - -e .[dev]

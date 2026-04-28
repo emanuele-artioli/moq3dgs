@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moq3dgs"
+version = "0.1.0"
+description = "Viewport-Aware 3D Gaussian Splatting over Media-over-QUIC"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Emanuele Artioli"},
+]
+
+dependencies = [
+    # Core
+    "numpy>=1.24",
+    "torch>=2.1",
+    "plyfile>=1.0",
+    "pydantic>=2.0",
+    # Async networking
+    "aioquic>=1.0",
+    # Rendering helpers
+    "Pillow>=10.0",
+    "tqdm>=4.65",
+    # Science / clustering
+    "scikit-learn>=1.3",
+    # Structured logging
+    "structlog>=23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "mypy>=1.5",
+]
+
+[project.scripts]
+moq3dgs-server = "moq3dgs.server_app:main"
+moq3dgs-client = "moq3dgs.client_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
