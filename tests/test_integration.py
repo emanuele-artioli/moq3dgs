@@ -1,4 +1,13 @@
-"""Integration test: server + client end-to-end over localhost."""
+"""Integration test: server + client end-to-end over localhost.
+
+Tests the complete pipeline:
+  - Server starts with synthetic scene data.
+  - Client connects, receives manifest.
+  - Client sends viewport update.
+  - Server streams matching clusters.
+  - Client receives and caches clusters.
+  - Client renders a frame via CPU fallback and saves to disk.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +31,7 @@ from moq3dgs.transport.server import MoQServer
 
 
 def _make_scene(n: int = 200) -> GaussianScene:
+    """Create a synthetic scene for testing."""
     rng = np.random.default_rng(42)
     return GaussianScene(
         means=torch.from_numpy(rng.standard_normal((n, 3)).astype(np.float32)),
@@ -35,6 +45,7 @@ def _make_scene(n: int = 200) -> GaussianScene:
 
 
 def _build_server(port: int) -> MoQServer:
+    """Build a server with synthetic data."""
     scene = _make_scene()
     clusters = cluster_gaussians_kmeans(scene, num_clusters=4)
     lod_cache: Dict[int, List[LoDLayer]] = {}
@@ -52,40 +63,105 @@ async def test_server_client_roundtrip() -> None:
     await server.start()
 
     try:
-        client = MoQClient(host="127.0.0.1", port=port)
-        manifest = await client.connect()
-        assert len(manifest.tracks) > 0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = MoQClient(
+                host="127.0.0.1",
+                port=port,
+                output_dir=tmpdir,
+                render_enabled=False,  # skip rendering in unit tests
+            )
+            manifest = await client.connect()
+            assert len(manifest.tracks) > 0
 
-        await client.start_receiving()
+            await client.start_receiving()
 
-        update = ViewportUpdate(
-            client_id="test-client",
-            timestamp_ms=0,
-            camera_position=[0.0, 0.0, 0.0],
-            view_matrix=[
-                [1, 0, 0, 0],
-                [0, 1, 0, 0],
-                [0, 0, 1, 0],
-                [0, 0, 0, 1],
-            ],
-            fov=90.0,
-        )
-        await client.send_viewport_update(update)
-        # Give the server time to respond
-        await asyncio.sleep(0.3)
+            update = ViewportUpdate(
+                client_id="test-client",
+                timestamp_ms=0,
+                camera_position=[0.0, 0.0, 0.0],
+                view_matrix=[
+                    [1, 0, 0, 0],
+                    [0, 1, 0, 0],
+                    [0, 0, 1, 0],
+                    [0, 0, 0, 1],
+                ],
+                fov=90.0,
+            )
+            await client.send_viewport_update(update)
+            # Give the server time to respond
+            await asyncio.sleep(0.5)
 
-        received = []
-        while not client.received_queue.empty():
-            received.append(client.received_queue.get_nowait())
+            # We should have received at least some clusters
+            assert client.cache.num_entries > 0
+            assert client._clusters_received > 0
 
-        # We should have received at least some clusters
-        assert len(received) > 0
-        # Each cluster should have a track_id and group_id
-        for cluster in received:
-            assert "track_id" in cluster
-            assert "group_id" in cluster
-            assert cluster["num_gaussians"] > 0
+            # Verify cache has valid data
+            assembled = client.cache.assemble_base()
+            assert assembled is not None
+            assert assembled["num_gaussians"] > 0
+            assert assembled["means"] is not None
 
-        await client.disconnect()
+            # Verify manifest was saved
+            assert Path(tmpdir, "manifest.json").exists()
+
+            await client.disconnect()
+    finally:
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_client_render_cpu_fallback() -> None:
+    """Test that the client can render a frame using CPU fallback."""
+    port = 14434
+    server = _build_server(port)
+    await server.start()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = MoQClient(
+                host="127.0.0.1",
+                port=port,
+                output_dir=tmpdir,
+                render_enabled=True,
+                device="cpu",  # force CPU fallback
+                image_width=320,
+                image_height=240,
+            )
+            await client.connect()
+            await client.start_receiving()
+
+            update = ViewportUpdate(
+                client_id="test-client",
+                timestamp_ms=0,
+                camera_position=[0.0, 0.0, 5.0],
+                view_matrix=[
+                    [1, 0, 0, 0],
+                    [0, 1, 0, 0],
+                    [0, 0, 1, -5],
+                    [0, 0, 0, 1],
+                ],
+                fov=60.0,
+            )
+            await client.send_viewport_update(update)
+            await asyncio.sleep(0.5)
+
+            # Render
+            path = client.render_frame(
+                frame_idx=0,
+                view_matrix=update.view_matrix,
+                fov=update.fov,
+                camera_position=update.camera_position,
+            )
+
+            # Should have rendered something (even if mostly black)
+            assert path is not None
+            assert path.exists()
+            assert path.suffix == ".png"
+
+            # Check metrics file
+            metrics_path = Path(tmpdir, "frames", "metrics.jsonl")
+            assert metrics_path.exists()
+
+            await client.disconnect()
     finally:
         await server.stop()

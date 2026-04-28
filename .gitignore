@@ -121,6 +121,6 @@ celerybeat.pid
 
 # MoQ-3DGS specific ignores
 assets/*
-outputs/*
+output/*
 
 

@@ -100,14 +100,17 @@ def _render_gsplat(
     vm = view_matrix.to(device)
     pm = proj_matrix.to(device)
 
-    # gsplat expects specific SH format; adapt
+    # gsplat expects specific format; convert SH DC to RGB colors
     sh = sh_coeffs.to(device)
-    if sh.dim() == 2:
-        sh = sh.unsqueeze(1)  # (N, 1, C)
+    if sh.dim() == 1:
+        sh = sh.reshape(len(m), -1)
+    
+    SH_C0 = 0.28209479177387814
+    colors = torch.clamp(sh[:, :3] * SH_C0 + 0.5, 0.0, 1.0)
 
     rendered, _ = gsplat.rasterization(
         means=m, quats=r, scales=s, opacities=o,
-        colors=sh, viewmats=vm.unsqueeze(0),
+        colors=colors, viewmats=vm.unsqueeze(0),
         Ks=pm[:3, :3].unsqueeze(0),
         width=w, height=h,
         backgrounds=bg.unsqueeze(0),
@@ -150,8 +153,12 @@ def _render_cpu_fallback(
     depth = ndc[:, 2]
 
     # Simple SH0 → colour (first 3 coeffs treated as RGB)
-    if sh_coeffs is not None and sh_coeffs.numel() >= n * 3:
-        colors = sh_coeffs[:, :3].numpy()
+    sh = sh_coeffs
+    if sh is not None and sh.numel() >= n * 3:
+        # sh_coeffs may arrive as 1D (flat from cache) or 2D (N, C)
+        if sh.dim() == 1:
+            sh = sh.reshape(n, -1)
+        colors = sh[:, :3].numpy()
         # SH0 to colour: C = SH_C0 * sh + 0.5
         SH_C0 = 0.28209479177387814
         colors = np.clip(colors * SH_C0 + 0.5, 0, 1)

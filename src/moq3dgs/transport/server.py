@@ -123,36 +123,44 @@ class MoQServer:
     async def _on_viewport(self, session: ClientSession, data: dict) -> None:
         update = ViewportUpdate(**data)
         session.last_viewport = update
-        vm = np.array(update.view_matrix, dtype=np.float64)
-        proj = projection_matrix_from_fov(update.fov)
-        frustum = extract_frustum(proj @ vm)
-        cam_pos = np.array(update.camera_position, dtype=np.float64)
-        cam_fwd = camera_forward_from_view_matrix(update.view_matrix)
-
-        for cid, cluster in self.clusters.items():
-            vis = check_aabb_frustum(cluster.bbox_min, cluster.bbox_max, frustum)
-            if vis == Visibility.OUTSIDE:
-                continue
-            for lod in self.lod_cache.get(cid, []):
-                sh = (lod.sh_dc.reshape(lod.num_gaussians, -1)
-                      if lod.sh_dc is not None
-                      else (lod.sh_rest.reshape(lod.num_gaussians, -1)
-                            if lod.sh_rest is not None else None))
-                sc = lod.scales_base if lod.scales_base is not None else lod.scales_delta
-                frame = encode_cluster(
-                    f"track-{cid:04d}", f"group-{cid:04d}-0",
-                    int(lod.level), lod.num_gaussians,
-                    lod.means, lod.opacities, sh, sc, lod.rotations,
-                )
-                await self._send_binary(session.writer, frame)
-                session.bytes_sent += len(frame)
-                self._total_bytes_sent += len(frame)
+        # Server can use this for dynamic priority adjustment of in-flight data,
+        # but for static scenes, data is sent on subscribe.
 
     async def _on_subscribe(self, session: ClientSession, data: dict) -> None:
         sub = MoQSubscription(**data)
         session.subscriptions[f"{sub.track_id}/{sub.group_id}"] = sub
         ack = SubscriptionAck(track_id=sub.track_id, group_id=sub.group_id, accepted=True)
         await self._send_json(session.writer, {"type": "subscribe_ack", "data": ack.model_dump()})
+
+        # Find the cluster for this track/group and send it
+        # Assuming track_id="track-0000", group_id="group-0000-0"
+        try:
+            cid = int(sub.group_id.split("-")[1])
+        except (IndexError, ValueError):
+            return
+
+        cluster = self.clusters.get(cid)
+        if not cluster:
+            return
+
+        # Send all requested LoD layers
+        for lod in self.lod_cache.get(cid, []):
+            if lod.level > sub.max_object_id:
+                continue
+                
+            sh = (lod.sh_dc.reshape(lod.num_gaussians, -1)
+                  if lod.sh_dc is not None
+                  else (lod.sh_rest.reshape(lod.num_gaussians, -1)
+                        if lod.sh_rest is not None else None))
+            sc = lod.scales_base if lod.scales_base is not None else lod.scales_delta
+            frame = encode_cluster(
+                sub.track_id, sub.group_id,
+                int(lod.level), lod.num_gaussians,
+                lod.means, lod.opacities, sh, sc, lod.rotations,
+            )
+            await self._send_binary(session.writer, frame)
+            session.bytes_sent += len(frame)
+            self._total_bytes_sent += len(frame)
 
     @staticmethod
     async def _send_json(w: asyncio.StreamWriter, obj: dict) -> None:

@@ -2,11 +2,11 @@
 
 Usage::
 
-    python -m moq3dgs.server_app --scene /path/to/scene --port 4433
+    python -m moq3dgs.server_app --scene assets/bicycle.ply --port 4433
 
 Or via the installed console script::
 
-    moq3dgs-server --scene /path/to/scene
+    moq3dgs-server --scene assets/bicycle.ply
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import structlog
 
 from moq3dgs.transport.server import create_server
 
-DEFAULT_SCENE = "/home/itec/emanuele/3dgs_moq/assets/train_scene/point_cloud.ply"
+DEFAULT_SCENE = "assets/bicycle.ply"
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scene", type=str, default=DEFAULT_SCENE,
-        help="Path to the 3DGS scene directory or .ply file.",
+        help="Path to the 3DGS .ply file or scene directory.",
     )
     parser.add_argument(
         "--clusters", type=int, default=64,
