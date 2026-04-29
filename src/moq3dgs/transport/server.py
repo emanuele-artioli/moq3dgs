@@ -19,7 +19,7 @@ import structlog
 
 from moq3dgs.decorators import network_bound
 from moq3dgs.models import (
-    LoDLevel, MoQSubscription, SceneManifest,
+    ImportanceTier, MoQSubscription, SceneManifest,
     ServerStatus, SubscriptionAck, ViewportUpdate,
 )
 from moq3dgs.scene.clustering import Cluster, cluster_gaussians_kmeans
@@ -145,7 +145,7 @@ class MoQServer:
 
         # Send all requested LoD layers
         for lod in self.lod_cache.get(cid, []):
-            if lod.level > sub.max_object_id:
+            if lod.tier > sub.max_subgroup_id:
                 continue
                 
             sh = (lod.sh_dc.reshape(lod.num_gaussians, -1)
@@ -155,7 +155,7 @@ class MoQServer:
             sc = lod.scales_base if lod.scales_base is not None else lod.scales_delta
             frame = encode_cluster(
                 sub.track_id, sub.group_id,
-                int(lod.level), lod.num_gaussians,
+                int(lod.tier), lod.num_gaussians,
                 lod.means, lod.opacities, sh, sc, lod.rotations,
             )
             await self._send_binary(session.writer, frame)

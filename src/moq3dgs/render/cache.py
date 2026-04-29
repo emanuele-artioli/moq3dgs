@@ -55,13 +55,13 @@ class SplatCache:
         """Check whether a cluster is already cached."""
         return (track_id, group_id, subgroup_id, object_id) in self._store
 
-    def get(self, track_id: str, group_id: str, object_id: int) -> Optional[dict]:
+    def get(self, track_id: str, group_id: str, subgroup_id: int, object_id: int) -> Optional[dict]:
         """Retrieve a cached cluster."""
-        return self._store.get((track_id, group_id, object_id))
+        return self._store.get((track_id, group_id, subgroup_id, object_id))
 
-    def evict(self, track_id: str, group_id: str, object_id: int) -> None:
+    def evict(self, track_id: str, group_id: str, subgroup_id: int, object_id: int) -> None:
         """Remove a cluster from the cache."""
-        key = (track_id, group_id, object_id)
+        key = (track_id, group_id, subgroup_id, object_id)
         with self._lock:
             self._store.pop(key, None)
 
@@ -84,7 +84,7 @@ class SplatCache:
         """
         with self._lock:
             base_entries = [
-                v for (_, _, oid), v in self._store.items() if oid == 0
+                v for (_, _, sub_id, oid), v in self._store.items() if sub_id in (0, 1, 2) and oid == 0
             ]
         if not base_entries:
             return None

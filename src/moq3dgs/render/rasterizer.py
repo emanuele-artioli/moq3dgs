@@ -28,11 +28,12 @@ def render_gaussians(
     sh_coeffs: torch.Tensor,       # (N, C)
     scales: torch.Tensor,          # (N, 3)  log-space
     rotations: torch.Tensor,       # (N, 4)  quaternion
-    view_matrix: torch.Tensor,     # (4, 4)
-    proj_matrix: torch.Tensor,     # (4, 4)
+    view_matrix: torch.Tensor,     # (4, 4)  world-to-camera
+    proj_matrix: torch.Tensor,     # (4, 4)  GL projection (for CPU fallback NDC)
     camera_pos: torch.Tensor,      # (3,)
     image_width: int = 1920,
     image_height: int = 1080,
+    fov_y_deg: float = 60.0,       # vertical FOV – used to build intrinsic K
     bg_color: Optional[torch.Tensor] = None,
     device: str = "cuda:0",
 ) -> torch.Tensor:
@@ -63,24 +64,39 @@ def render_gaussians(
     if bg_color is None:
         bg_color = torch.zeros(3, device=device)
 
+    # Build pixel-space camera intrinsic matrix K from FOV.
+    # gsplat requires K (not a GL projection matrix).
+    fov_rad = np.radians(fov_y_deg)
+    fy_px = (image_height / 2.0) / np.tan(fov_rad / 2.0)
+    fx_px = fy_px  # square pixels
+    K = torch.tensor(
+        [[fx_px, 0.0, image_width / 2.0],
+         [0.0, fy_px, image_height / 2.0],
+         [0.0, 0.0, 1.0]],
+        dtype=torch.float32,
+    )
+
     # Try hardware-accelerated rasteriser first
     try:
         return _render_gsplat(
             means, opacities, sh_coeffs, scales, rotations,
-            view_matrix, proj_matrix, camera_pos,
+            view_matrix, K,
             image_width, image_height, bg_color, device,
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         logger.debug("gsplat_failed", error=str(e))
         pass
 
-    # Fallback: naive CPU renderer
+    # Fallback: naive CPU renderer (uses GL proj for NDC, K for focal lengths)
     logger.warning("gpu_rasteriser_unavailable_falling_back_to_cpu")
     return _render_cpu_fallback(
         means, opacities, sh_coeffs, scales, rotations,
         view_matrix, proj_matrix, camera_pos,
         image_width, image_height, bg_color,
-        device=device
+        fx_px=fx_px, fy_px=fy_px,
+        device=device,
     )
 
 
@@ -88,10 +104,14 @@ def _render_gsplat(
     means: torch.Tensor, opacities: torch.Tensor,
     sh_coeffs: torch.Tensor, scales: torch.Tensor,
     rotations: torch.Tensor, view_matrix: torch.Tensor,
-    proj_matrix: torch.Tensor, camera_pos: torch.Tensor,
+    K: torch.Tensor,          # (3, 3) camera intrinsics
     w: int, h: int, bg: torch.Tensor, device: str,
 ) -> torch.Tensor:
-    """Render via the gsplat library (if available)."""
+    """Render via the gsplat library (if available).
+
+    Args:
+        K: Pixel-space camera intrinsic matrix [[fx,0,cx],[0,fy,cy],[0,0,1]].
+    """
     import gsplat  # noqa: F811
 
     # Move everything to device
@@ -100,7 +120,7 @@ def _render_gsplat(
     s = torch.exp(scales.to(device))
     r = rotations.to(device)
     vm = view_matrix.to(device)
-    pm = proj_matrix.to(device)
+    Ks = K.to(device).unsqueeze(0)  # (1, 3, 3)
 
     # gsplat expects specific format; convert SH DC to RGB colors
     sh = sh_coeffs.to(device)
@@ -110,13 +130,13 @@ def _render_gsplat(
     SH_C0 = 0.28209479177387814
     colors = torch.clamp(sh[:, :3] * SH_C0 + 0.5, 0.0, 1.0)
 
-    rendered, _ = gsplat.rasterization(
+    outputs = gsplat.rasterization(
         means=m, quats=r, scales=s, opacities=o,
         colors=colors, viewmats=vm.unsqueeze(0),
-        Ks=pm[:3, :3].unsqueeze(0),
+        Ks=Ks,
         width=w, height=h,
-        backgrounds=bg.unsqueeze(0),
     )
+    rendered = outputs[0]  # (1, H, W, 3)
     img = rendered[0].clamp(0, 1) * 255
     return img.byte().cpu()
 
@@ -127,6 +147,8 @@ def _render_cpu_fallback(
     rotations: torch.Tensor, view_matrix: torch.Tensor,
     proj_matrix: torch.Tensor, camera_pos: torch.Tensor,
     w: int, h: int, bg: torch.Tensor,
+    fx_px: float = 276.0,
+    fy_px: float = 276.0,
     device: str = "cpu",
 ) -> torch.Tensor:
     """A PyTorch-based rasterizer to draw proper 3DGS splats.
@@ -233,10 +255,9 @@ def _render_cpu_fallback(
     M = R @ S
     Sigma = M @ M.mT
     
-    # Jacobian of perspective projection
-    # Extract fov from proj matrix or approx:
-    fx = proj_matrix[0, 0] * w / 2
-    fy = proj_matrix[1, 1] * h / 2
+    # Jacobian of perspective projection — use pixel-space focal lengths
+    fx = fx_px
+    fy = fy_px
     
     tx = means_cam[:, 0]
     ty = means_cam[:, 1]

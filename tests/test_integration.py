@@ -156,7 +156,7 @@ async def test_client_render_cpu_fallback() -> None:
             # Should have rendered something (even if mostly black)
             assert path is not None
             assert path.exists()
-            assert path.suffix == ".png"
+            assert path.suffix == ".mp4"
 
             # Check metrics file
             metrics_path = Path(tmpdir, "frames", "metrics.jsonl")

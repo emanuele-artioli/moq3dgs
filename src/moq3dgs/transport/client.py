@@ -30,7 +30,7 @@ import torch
 
 from moq3dgs.decorators import network_bound
 from moq3dgs.models import (
-    LoDLevel,
+    ImportanceTier,
     MoQSubscription,
     SceneManifest,
     TrackInfo,
@@ -207,13 +207,20 @@ class MoQClient:
 
                 # Binary cluster frame
                 cluster = decode_cluster(data)
+                
+                # Protocol currently encodes ImportanceTier (subgroup_id) in the object_id field.
+                # True MoQ Object serialization will come later.
+                tier = cluster.pop("object_id")
+                cluster["subgroup_id"] = tier
+                cluster["object_id"] = 0
+                
                 self.cache.put(cluster)
                 self._clusters_received += 1
                 logger.debug(
                     "cluster_received",
                     track=cluster["track_id"],
                     group=cluster["group_id"],
-                    obj=cluster["object_id"],
+                    tier=tier,
                     n=cluster["num_gaussians"],
                 )
 
@@ -283,7 +290,7 @@ class MoQClient:
 
                 key = f"{track.track_id}/{group.group_id}"
                 # Only subscribe if not already cached (base layer)
-                if not self.cache.has(track.track_id, group.group_id, 0):
+                if not self.cache.has(track.track_id, group.group_id, 0, 0):
                     if key not in self._subscribed:
                         priority = compute_priority(
                             camera_pos,
@@ -291,11 +298,11 @@ class MoQClient:
                             np.array(group.bbox_min),
                             np.array(group.bbox_max),
                             frustum,
-                            LoDLevel.BASE,
+                            ImportanceTier.BASE_LARGE,
                         )
                         await self._subscribe(
                             track.track_id, group.group_id,
-                            max_object_id=1, priority=priority,
+                            max_subgroup_id=4, priority=priority,
                         )
                         self._subscribed.add(key)
 
@@ -303,14 +310,14 @@ class MoQClient:
         self,
         track_id: str,
         group_id: str,
-        max_object_id: int = 1,
+        max_subgroup_id: int = 4,
         priority: int = 128,
     ) -> None:
         """Send a MoQ subscription request."""
         sub = MoQSubscription(
             track_id=track_id,
             group_id=group_id,
-            max_object_id=max_object_id,
+            max_subgroup_id=max_subgroup_id,
             priority=priority,
         )
         await self._send_json({
@@ -376,6 +383,7 @@ class MoQClient:
             camera_pos=cam_pos,
             image_width=self.image_width,
             image_height=self.image_height,
+            fov_y_deg=fov,
             device=self.device,
         )
 

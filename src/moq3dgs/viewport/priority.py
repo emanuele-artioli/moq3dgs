@@ -15,7 +15,7 @@ from typing import List
 
 import numpy as np
 
-from moq3dgs.models import LoDLevel
+from moq3dgs.models import ImportanceTier
 from moq3dgs.viewport.frustum import (
     Frustum,
     Visibility,
@@ -63,9 +63,16 @@ def _frustum_score(
     return score
 
 
-def _lod_score(level: LoDLevel) -> float:
-    """Base LoD → 0.0 (highest priority boost), Enhancement → 0.3."""
-    return 0.0 if level == LoDLevel.BASE else 0.3
+def _lod_score(tier: ImportanceTier) -> float:
+    """Base geometry (0-2) gets highest priority boost, enhancements (3-4) get less."""
+    scores = {
+        ImportanceTier.BASE_LARGE: 0.0,
+        ImportanceTier.BASE_MEDIUM: 0.05,
+        ImportanceTier.BASE_SMALL: 0.10,
+        ImportanceTier.ENHANCE_LARGE: 0.20,
+        ImportanceTier.ENHANCE_MEDIUM: 0.30,
+    }
+    return scores.get(tier, 0.5)
 
 
 def compute_priority(
@@ -74,7 +81,7 @@ def compute_priority(
     cluster_bbox_min: np.ndarray,
     cluster_bbox_max: np.ndarray,
     frustum: Frustum,
-    lod_level: LoDLevel,
+    subgroup_id: ImportanceTier,
     max_distance: float = 50.0,
     *,
     weight_distance: float = 0.4,
@@ -107,7 +114,7 @@ def compute_priority(
 
     d_score = _distance_score(camera_pos, center, max_distance)
     f_score = _frustum_score(center, camera_pos, camera_forward, visibility)
-    l_score = _lod_score(lod_level)
+    l_score = _lod_score(subgroup_id)
 
     combined = (
         weight_distance * d_score
@@ -122,7 +129,7 @@ def batch_compute_priorities(
     camera_forward: np.ndarray,
     frustum: Frustum,
     clusters: List[dict],
-    lod_level: LoDLevel,
+    subgroup_id: ImportanceTier,
     max_distance: float = 50.0,
 ) -> List[int]:
     """Compute priorities for a batch of clusters at once.
@@ -148,7 +155,7 @@ def batch_compute_priorities(
             c["bbox_min"],
             c["bbox_max"],
             frustum,
-            lod_level,
+            subgroup_id,
             max_distance,
         )
         for c in clusters

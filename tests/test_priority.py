@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from moq3dgs.models import LoDLevel
+from moq3dgs.models import ImportanceTier
 from moq3dgs.viewport.frustum import extract_frustum, projection_matrix_from_fov
 from moq3dgs.viewport.priority import compute_priority
 
@@ -28,7 +28,7 @@ class TestPriority:
             cluster_bbox_min=np.array([-1, -1, -5]),
             cluster_bbox_max=np.array([1, 1, -3]),
             frustum=frustum,
-            lod_level=LoDLevel.BASE,
+            subgroup_id=ImportanceTier.BASE_LARGE,
             max_distance=50.0,
         )
         assert p < 50, f"Expected high priority (<50) but got {p}"
@@ -42,7 +42,7 @@ class TestPriority:
             cluster_bbox_min=np.array([-1, -1, 40]),
             cluster_bbox_max=np.array([1, 1, 50]),
             frustum=frustum,
-            lod_level=LoDLevel.ENHANCEMENT,
+            subgroup_id=ImportanceTier.ENHANCE_MEDIUM,
             max_distance=50.0,
         )
         assert p > 150, f"Expected low priority (>150) but got {p}"
@@ -58,8 +58,8 @@ class TestPriority:
             frustum=frustum,
             max_distance=50.0,
         )
-        p_base = compute_priority(**kwargs, lod_level=LoDLevel.BASE)
-        p_enh = compute_priority(**kwargs, lod_level=LoDLevel.ENHANCEMENT)
+        p_base = compute_priority(**kwargs, subgroup_id=ImportanceTier.BASE_LARGE)
+        p_enh = compute_priority(**kwargs, subgroup_id=ImportanceTier.ENHANCE_MEDIUM)
         assert p_base < p_enh
 
     def test_priority_in_range(self) -> None:
@@ -72,6 +72,6 @@ class TestPriority:
                 cluster_bbox_min=np.array([-1, -1, -dist - 1]),
                 cluster_bbox_max=np.array([1, 1, -dist]),
                 frustum=frustum,
-                lod_level=LoDLevel.BASE,
+                subgroup_id=ImportanceTier.BASE_LARGE,
             )
             assert 0 <= p <= 255

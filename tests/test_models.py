@@ -7,9 +7,11 @@ import pytest
 from moq3dgs.models import (
     GaussianCluster,
     GroupInfo,
-    LoDLevel,
+    ImportanceTier,
     MoQSubscription,
     SceneManifest,
+    ServerStatus,
+    SubscriptionAck,
     TrackInfo,
     ViewportUpdate,
 )
@@ -57,17 +59,17 @@ class TestMoQSubscription:
         sub = MoQSubscription(
             track_id="track-0001",
             group_id="group-0001-0",
-            max_object_id=1,
+            max_subgroup_id=1,
             priority=128,
         )
-        assert sub.max_object_id == 1
+        assert sub.max_subgroup_id == 1
         assert sub.priority == 128
 
     def test_priority_out_of_range(self) -> None:
         with pytest.raises(Exception):
             MoQSubscription(
                 track_id="t", group_id="g",
-                max_object_id=0, priority=300,
+                max_subgroup_id=0, priority=300,
             )
 
 
@@ -101,9 +103,7 @@ class TestSceneManifest:
         assert len(restored.tracks) == 1
 
 
-class TestLoDLevel:
-    """Test LoD enumeration."""
-
-    def test_values(self) -> None:
-        assert LoDLevel.BASE == 0
-        assert LoDLevel.ENHANCEMENT == 1
+class TestImportanceTier:
+    def test_enum_values(self):
+        assert ImportanceTier.BASE_LARGE == 0
+        assert ImportanceTier.ENHANCE_MEDIUM == 4
