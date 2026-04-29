@@ -11,6 +11,11 @@ Or via the installed console script::
 
 from __future__ import annotations
 
+import os
+
+# Fix OpenBLAS thread limit issue for large-scale K-means clustering
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+
 import argparse
 import asyncio
 import logging

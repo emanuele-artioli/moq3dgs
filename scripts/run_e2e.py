@@ -19,8 +19,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import time
+ 
+# Fix OpenBLAS thread limit issue for large-scale K-means clustering
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+ 
 from pathlib import Path
 
 import structlog
@@ -83,14 +88,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="End-to-end MoQ 3DGS test")
     parser.add_argument("--scene", type=str, default="assets/bicycle.ply")
     parser.add_argument("--trace", type=str, default="assets/bicycle_trace.json")
-    parser.add_argument("--output", type=str, default=f"output/{time.strftime('%Y%m%d_%H%M%S')}")
+    parser.add_argument("--output", type=str, default="output/exp")
     parser.add_argument("--clusters", type=int, default=256)
     parser.add_argument("--port", type=int, default=14435)
     parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--frame-delay", type=float, default=0.1)
-    parser.add_argument("--max-frames", type=int, default=10,
+    parser.add_argument("--frame-delay", type=float, default=0.0)
+    parser.add_argument("--max-frames", type=int, default=100,
                         help="Limit trace to first N frames for quick testing.")
     parser.add_argument("--no-render", action="store_true",
                         help="Disable rendering (transport-only benchmark).")
@@ -98,6 +103,10 @@ def main() -> None:
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
+    # Ensure output directory has a timestamp to avoid collisions
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    args.output = str(Path(args.output).with_name(f"{Path(args.output).name}_{timestamp}"))
+ 
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, args.log_level)

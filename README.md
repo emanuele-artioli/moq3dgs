@@ -49,12 +49,17 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-```bash
-# Terminal 1: Start server
-moq3dgs-server --scene /path/to/train_scene --clusters 64 --port 4433
+The server loads the PLY, partitions it into 3D clusters (using K-means), and starts an MoQ/QUIC publisher.
 
-# Terminal 2: Start client
-moq3dgs-client --trace /path/to/eval_trace_01.json --output ./output
+> [!NOTE]
+> On this machine, GPU 0 is often occupied by other processes. It is recommended to use `cuda:1` for rendering.
+
+```bash
+# Start server
+moq3dgs-server --scene assets/bicycle.ply --clusters 64 --port 4433
+
+# Start client (points to GPU 1 by default)
+moq3dgs-client --trace assets/bicycle_trace.json --device cuda:1
 ```
 
 ## Testing

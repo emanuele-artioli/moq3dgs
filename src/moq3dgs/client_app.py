@@ -11,10 +11,16 @@ Or via the installed console script::
 
 from __future__ import annotations
 
+import os
+
+# Fix OpenBLAS thread limit issue
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+
 import argparse
 import asyncio
 import logging
 import sys
+import time
 
 import structlog
 
@@ -42,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to the camera movement trace JSON.",
     )
     parser.add_argument(
-        "--output", type=str, default="./output",
+        "--output", type=str, default=f"./output/{time.strftime('%Y%m%d_%H%M%S')}",
         help="Directory to save rendered frames and metrics.",
     )
     parser.add_argument(
@@ -50,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         help="Client identifier.",
     )
     parser.add_argument(
-        "--device", type=str, default="cuda:0",
+        "--device", type=str, default="cuda:1",
         help="CUDA device for rendering (e.g. cuda:0, cuda:1, cpu).",
     )
     parser.add_argument(
