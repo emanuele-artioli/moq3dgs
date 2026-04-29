@@ -22,10 +22,19 @@ Server                              Client
 | MoQ Concept   | 3DGS Mapping                                      |
 |---------------|----------------------------------------------------|
 | **Broadcast** | Entire 3DGS scene                                  |
-| **Track**     | Spatial volume (octree node / K-means cluster)     |
-| **Group**     | Chunk of Gaussians within a volume                 |
-| **Object 0**  | Base: position + opacity + DC colour (SH0)         |
-| **Object 1**  | Enhancement: SH1-SH3 + scale refinements           |
+| **Track**     | Spatial volume (Octree leaf / e.g., Room)          |
+| **Group**     | Density cluster within a Track (K-Means / Item)    |
+| **Subgroup**  | Importance Tier (LoD based on splat scale/volume)  |
+| **Object**    | Chunked payload (SH bands split into Objects)      |
+
+**Subgroup (Importance Tier) Breakdown:**
+*   **Subgroup 0**: Large Splats (Geometry + Opacity + SH0)
+*   **Subgroup 1**: Medium Splats (Geometry + Opacity + SH0)
+*   **Subgroup 2**: Small/Fine Splats (Geometry + Opacity + SH0)
+*   **Subgroup 3**: Large Splats (SH1-SH3)
+*   **Subgroup 4**: Medium/Small Splats (SH1-SH3)
+
+*Note: Base geometry (Subgroups 0-2) always holds priority over reflections (Subgroups 3-4).*
 
 ## Setup
 
@@ -83,11 +92,11 @@ src/moq3dgs/
 
 ## Priority Scheme
 
-Priority `0` (highest) → `255` (lowest), computed from:
+Priority `0` (highest) → `255` (lowest), computed dynamically:
 
 1. **Distance to camera** — closer = higher priority
 2. **Frustum position** — centre = highest, periphery = medium, behind = lowest
-3. **LoD layer** — base (Object 0) > enhancement (Object 1)
+3. **Importance Tier (Subgroup)** — Subgroups 0-2 (Base Geometry) > Subgroups 3-4 (SH Reflections). Priorities ebb and flow based on the viewport, but geometry always maintains a baseline priority over reflections.
 
 ## License
 

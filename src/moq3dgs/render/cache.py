@@ -19,7 +19,7 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-CacheKey = Tuple[str, str, int]  # (track_id, group_id, object_id)
+CacheKey = Tuple[str, str, int, int]  # (track_id, group_id, subgroup_id, object_id)
 
 
 class SplatCache:
@@ -39,20 +39,21 @@ class SplatCache:
 
         Args:
             cluster: Dict with keys ``track_id``, ``group_id``,
-                ``object_id``, and tensor attributes.
+                ``subgroup_id``, ``object_id``, and tensor attributes.
         """
         key: CacheKey = (
             cluster["track_id"],
             cluster["group_id"],
+            cluster["subgroup_id"],
             cluster["object_id"],
         )
         with self._lock:
             self._store[key] = cluster
         logger.debug("cache_put", key=key, n=cluster.get("num_gaussians"))
 
-    def has(self, track_id: str, group_id: str, object_id: int) -> bool:
+    def has(self, track_id: str, group_id: str, subgroup_id: int, object_id: int) -> bool:
         """Check whether a cluster is already cached."""
-        return (track_id, group_id, object_id) in self._store
+        return (track_id, group_id, subgroup_id, object_id) in self._store
 
     def get(self, track_id: str, group_id: str, object_id: int) -> Optional[dict]:
         """Retrieve a cached cluster."""

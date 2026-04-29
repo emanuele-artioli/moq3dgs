@@ -17,15 +17,21 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
-class LoDLevel(IntEnum):
-    """Level-of-Detail identifiers mapped to MoQ Object IDs.
+class ImportanceTier(IntEnum):
+    """Importance Tiers mapped to MoQ Subgroups.
 
-    Object 0 carries base geometry + opacity + DC colour (SH0).
-    Object 1 carries high-frequency details (SH1-SH3) + scale refinements.
+    Subgroup 0: Large Splats (Geometry + SH0)
+    Subgroup 1: Medium Splats (Geometry + SH0)
+    Subgroup 2: Small Splats (Geometry + SH0)
+    Subgroup 3: Large Splats (SH1-SH3)
+    Subgroup 4: Medium/Small Splats (SH1-SH3)
     """
 
-    BASE = 0
-    ENHANCEMENT = 1
+    BASE_LARGE = 0
+    BASE_MEDIUM = 1
+    BASE_SMALL = 2
+    ENHANCE_LARGE = 3
+    ENHANCE_MEDIUM = 4
 
 
 # ---------------------------------------------------------------------------
@@ -60,8 +66,8 @@ class MoQSubscription(BaseModel):
 
     track_id: str
     group_id: str
-    max_object_id: int = Field(
-        ..., ge=0, le=1, description="Requested LoD (0=base, 1=full)"
+    max_subgroup_id: int = Field(
+        ..., ge=0, le=4, description="Requested LoD tier (0=base large, 4=full)"
     )
     priority: int = Field(
         ..., ge=0, le=255, description="0=highest, 255=lowest"
@@ -84,8 +90,8 @@ class GroupInfo(BaseModel):
     num_gaussians: int
     bbox_min: List[float] = Field(..., min_length=3, max_length=3)
     bbox_max: List[float] = Field(..., min_length=3, max_length=3)
-    available_objects: List[int] = Field(
-        default=[0, 1], description="Which LoD layers are available"
+    available_subgroups: List[int] = Field(
+        default=[0, 1, 2, 3, 4], description="Which Importance Tiers are available"
     )
 
 
@@ -129,8 +135,11 @@ class GaussianCluster(BaseModel):
 
     track_id: str
     group_id: str
+    subgroup_id: int = Field(
+        ..., ge=0, le=4, description="Importance Tier (0-4)"
+    )
     object_id: int = Field(
-        ..., ge=0, le=1, description="0=base, 1=enhancement"
+        ..., ge=0, description="Payload fragment sequence within the subgroup"
     )
     num_gaussians: int
 
