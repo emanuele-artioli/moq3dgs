@@ -70,7 +70,8 @@ def render_gaussians(
             view_matrix, proj_matrix, camera_pos,
             image_width, image_height, bg_color, device,
         )
-    except ImportError:
+    except Exception as e:
+        logger.debug("gsplat_failed", error=str(e))
         pass
 
     # Fallback: naive CPU renderer
@@ -79,6 +80,7 @@ def render_gaussians(
         means, opacities, sh_coeffs, scales, rotations,
         view_matrix, proj_matrix, camera_pos,
         image_width, image_height, bg_color,
+        device=device
     )
 
 
@@ -125,56 +127,182 @@ def _render_cpu_fallback(
     rotations: torch.Tensor, view_matrix: torch.Tensor,
     proj_matrix: torch.Tensor, camera_pos: torch.Tensor,
     w: int, h: int, bg: torch.Tensor,
+    device: str = "cpu",
 ) -> torch.Tensor:
-    """Minimal depth-sorted point splatting on CPU.
-
-    Renders each Gaussian as a single pixel at its projected location,
-    depth-sorted back-to-front with alpha blending.  This is *not*
-    a production renderer — it exists only so tests and demos can
-    run without a GPU rasteriser.
+    """A PyTorch-based rasterizer to draw proper 3DGS splats.
+    Uses GPU if tensors are placed there by the caller.
     """
-    vp = (proj_matrix @ view_matrix).numpy().astype(np.float64)
-    pts = means.numpy().astype(np.float64)
-    n = len(pts)
+    with torch.no_grad():
+        if means.device.type == "cpu" and "cuda" in device:
+            means = means.to(device)
+            opacities = opacities.to(device)
+            sh_coeffs = sh_coeffs.to(device) if sh_coeffs is not None else None
+            scales = scales.to(device)
+            rotations = rotations.to(device)
+            view_matrix = view_matrix.to(device)
+            proj_matrix = proj_matrix.to(device)
+            camera_pos = camera_pos.to(device)
+            bg = bg.to(device)
+            
+        device = means.device
 
-    # Project to clip space
-    ones = np.ones((n, 1), dtype=np.float64)
-    world = np.hstack([pts, ones])  # (N, 4)
-    clip = (vp @ world.T).T  # (N, 4)
-
-    # Perspective divide
-    w_clip = clip[:, 3:4]
-    w_clip[w_clip == 0] = 1e-8
-    ndc = clip[:, :3] / w_clip
-
-    # NDC [-1,1] → pixel coords
-    px = ((ndc[:, 0] + 1) * 0.5 * w).astype(np.int32)
-    py = ((1 - (ndc[:, 1] + 1) * 0.5) * h).astype(np.int32)
-    depth = ndc[:, 2]
-
-    # Simple SH0 → colour (first 3 coeffs treated as RGB)
-    sh = sh_coeffs
-    if sh is not None and sh.numel() >= n * 3:
-        # sh_coeffs may arrive as 1D (flat from cache) or 2D (N, C)
-        if sh.dim() == 1:
-            sh = sh.reshape(n, -1)
-        colors = sh[:, :3].numpy()
-        # SH0 to colour: C = SH_C0 * sh + 0.5
+    n = len(means)
+    
+    # 1. Colors from SH0
+    if sh_coeffs is not None and sh_coeffs.numel() >= n * 3:
+        sh = sh_coeffs.reshape(n, -1)
+        colors = sh[:, :3]
         SH_C0 = 0.28209479177387814
-        colors = np.clip(colors * SH_C0 + 0.5, 0, 1)
+        colors = torch.clamp(colors * SH_C0 + 0.5, 0.0, 1.0)
     else:
-        colors = np.ones((n, 3), dtype=np.float32) * 0.5
-
-    alpha = torch.sigmoid(opacities).squeeze(-1).numpy()
-
-    # Sort back-to-front
-    order = np.argsort(-depth)
-
-    canvas = np.full((h, w, 3), bg.numpy().astype(np.float32), dtype=np.float32)
+        colors = torch.full((n, 3), 0.5, device=device)
+        
+    alpha = torch.sigmoid(opacities).squeeze(-1)
+    
+    # 2. View Transform
+    # view_matrix is usually (4, 4) world-to-cam
+    means_hom = torch.cat([means, torch.ones(n, 1, device=device)], dim=1)
+    means_cam = (view_matrix @ means_hom.T).T  # (N, 4)
+    depths = means_cam[:, 2]
+    
+    logger.debug("render_debug", 
+                 n=n, 
+                 depth_min=depths.min().item(), 
+                 depth_max=depths.max().item(),
+                 depth_mean=depths.mean().item())
+    
+    # Frustum cull (auto-detect Z direction)
+    num_pos = (depths > 0.1).sum().item()
+    num_neg = (depths < -0.1).sum().item()
+    
+    if num_neg > num_pos:
+        z_sign = -1.0
+        valid = depths < -0.1
+    else:
+        z_sign = 1.0
+        valid = depths > 0.1
+        
+    if not valid.any():
+        logger.warning("render_all_points_culled", num_pos=num_pos, num_neg=num_neg)
+        return (bg * 255).byte().cpu().expand(h, w, 3)
+        
+    # Filter
+    means_cam = means_cam[valid]
+    colors = colors[valid]
+    alpha = alpha[valid]
+    depths = depths[valid]
+    scales_v = torch.exp(scales[valid])
+    rots_v = rotations[valid]
+    
+    # 3. Projection to 2D
+    vp = proj_matrix @ view_matrix
+    clip = (vp @ means_hom[valid].T).T
+    
+    # Perspective division (use abs(w) to handle both conventions)
+    ndc = clip[:, :3] / (torch.abs(clip[:, 3:4]) + 1e-6)
+    px = ((ndc[:, 0] + 1.0) * 0.5 * w)
+    py = ((1.0 - (ndc[:, 1] + 1.0) * 0.5) * h)
+    
+    logger.debug("render_coords",
+                 px_min=px.min().item(), px_max=px.max().item(),
+                 py_min=py.min().item(), py_max=py.max().item(),
+                 color_mean=colors.mean().item(),
+                 alpha_mean=alpha.mean().item())
+    
+    # 4. 2D Covariance
+    # Quat to Rot matrix
+    qr, qi, qj, qk = rots_v[:, 0], rots_v[:, 1], rots_v[:, 2], rots_v[:, 3]
+    R = torch.zeros((len(rots_v), 3, 3), device=device)
+    R[:, 0, 0] = 1 - 2 * (qj**2 + qk**2)
+    R[:, 0, 1] = 2 * (qi*qj - qr*qk)
+    R[:, 0, 2] = 2 * (qi*qk + qr*qj)
+    R[:, 1, 0] = 2 * (qi*qj + qr*qk)
+    R[:, 1, 1] = 1 - 2 * (qi**2 + qk**2)
+    R[:, 1, 2] = 2 * (qj*qk - qr*qi)
+    R[:, 2, 0] = 2 * (qi*qk - qr*qj)
+    R[:, 2, 1] = 2 * (qj*qk + qr*qi)
+    R[:, 2, 2] = 1 - 2 * (qi**2 + qj**2)
+    
+    # Scale matrix
+    S = torch.zeros((len(scales_v), 3, 3), device=device)
+    S[:, 0, 0] = scales_v[:, 0]
+    S[:, 1, 1] = scales_v[:, 1]
+    S[:, 2, 2] = scales_v[:, 2]
+    
+    # 3D Covariance Sigma = R * S * S^T * R^T
+    M = R @ S
+    Sigma = M @ M.mT
+    
+    # Jacobian of perspective projection
+    # Extract fov from proj matrix or approx:
+    fx = proj_matrix[0, 0] * w / 2
+    fy = proj_matrix[1, 1] * h / 2
+    
+    tx = means_cam[:, 0]
+    ty = means_cam[:, 1]
+    tz = means_cam[:, 2]
+    
+    J = torch.zeros((len(tx), 2, 3), device=device)
+    J[:, 0, 0] = fx / tz
+    J[:, 0, 2] = -(fx * tx) / (tz**2)
+    J[:, 1, 1] = fy / tz
+    J[:, 1, 2] = -(fy * ty) / (tz**2)
+    
+    W = view_matrix[:3, :3].unsqueeze(0).expand(len(tx), 3, 3)
+    T = J @ W
+    
+    # 2D Covariance
+    Cov2D = T @ Sigma @ T.mT
+    Cov2D[:, 0, 0] += 0.3
+    Cov2D[:, 1, 1] += 0.3
+    
+    # Invert 2D Covariance
+    det = Cov2D[:, 0, 0] * Cov2D[:, 1, 1] - Cov2D[:, 0, 1] * Cov2D[:, 1, 0]
+    det = torch.clamp(det, min=1e-8)
+    invCov = torch.zeros_like(Cov2D)
+    invCov[:, 0, 0] = Cov2D[:, 1, 1] / det
+    invCov[:, 1, 1] = Cov2D[:, 0, 0] / det
+    invCov[:, 0, 1] = -Cov2D[:, 0, 1] / det
+    invCov[:, 1, 0] = -Cov2D[:, 1, 0] / det
+    
+    # Radii
+    eigen1 = 0.5 * (Cov2D[:, 0, 0] + Cov2D[:, 1, 1] + torch.sqrt(torch.clamp((Cov2D[:, 0, 0] - Cov2D[:, 1, 1])**2 + 4.0 * Cov2D[:, 0, 1]**2, min=0.0)))
+    radius = torch.ceil(3.0 * torch.sqrt(eigen1)).int()
+    
+    # Sort
+    order = torch.argsort(depths, descending=True)
+    
+    # 5. Draw
+    canvas = bg.clone().expand(h, w, 3).contiguous()
+    
     for idx in order:
-        x, y = int(px[idx]), int(py[idx])
-        if 0 <= x < w and 0 <= y < h:
-            a = float(alpha[idx])
-            canvas[y, x] = canvas[y, x] * (1 - a) + colors[idx] * a
+        cx, cy = int(px[idx]), int(py[idx])
+        r = int(radius[idx])
+        if r <= 0 or r > min(w, h): continue
+        
+        x_min = max(0, cx - r)
+        x_max = min(w, cx + r + 1)
+        y_min = max(0, cy - r)
+        y_max = min(h, cy + r + 1)
+        
+        if x_min >= x_max or y_min >= y_max: continue
+        
+        yy, xx = torch.meshgrid(
+            torch.arange(y_min, y_max, device=device, dtype=torch.float32),
+            torch.arange(x_min, x_max, device=device, dtype=torch.float32),
+            indexing='ij'
+        )
+        
+        dx = xx - px[idx]
+        dy = yy - py[idx]
+        
+        power = -0.5 * (invCov[idx, 0, 0] * dx**2 + 2.0 * invCov[idx, 0, 1] * dx * dy + invCov[idx, 1, 1] * dy**2)
+        valid_mask = power <= 0
+        G = torch.exp(power) * alpha[idx]
+        G = G * valid_mask
+        G = G.unsqueeze(-1)
+        
+        patch = canvas[y_min:y_max, x_min:x_max]
+        canvas[y_min:y_max, x_min:x_max] = patch * (1.0 - G) + colors[idx] * G
 
-    return torch.from_numpy((canvas * 255).clip(0, 255).astype(np.uint8))
+    return (canvas * 255.0).clamp(0, 255).byte().cpu()

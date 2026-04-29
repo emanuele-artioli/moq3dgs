@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 from pathlib import Path
 
 import structlog
@@ -81,11 +82,11 @@ async def run_e2e(
 def main() -> None:
     parser = argparse.ArgumentParser(description="End-to-end MoQ 3DGS test")
     parser.add_argument("--scene", type=str, default="assets/bicycle.ply")
-    parser.add_argument("--trace", type=str, default="assets/eval_trace.json")
-    parser.add_argument("--output", type=str, default="output/e2e_test")
-    parser.add_argument("--clusters", type=int, default=32)
+    parser.add_argument("--trace", type=str, default="assets/bicycle_trace.json")
+    parser.add_argument("--output", type=str, default=f"output/{time.strftime('%Y%m%d_%H%M%S')}")
+    parser.add_argument("--clusters", type=int, default=256)
     parser.add_argument("--port", type=int, default=14435)
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="cuda:1")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--frame-delay", type=float, default=0.1)

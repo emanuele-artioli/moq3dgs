@@ -102,7 +102,11 @@ class MoQClient:
 
         # Data state
         self.cache = SplatCache()
-        self._frame_writer = FrameWriter(self.output_dir / "frames")
+        self._frame_writer = FrameWriter(
+            self.output_dir / "frames", 
+            width=self.image_width, 
+            height=self.image_height
+        )
         self._subscribed: Set[str] = set()  # "track/group" keys
 
         # Metrics
@@ -159,6 +163,10 @@ class MoQClient:
                 pass
         if self._writer:
             self._writer.close()
+            
+        if self._frame_writer:
+            self._frame_writer.close()
+            
         logger.info(
             "disconnected",
             bytes_received=self._bytes_received,
@@ -352,7 +360,7 @@ class MoQClient:
 
         vm = torch.tensor(view_matrix, dtype=torch.float32)
         proj = torch.tensor(
-            projection_matrix_from_fov(fov).astype(np.float32),
+            projection_matrix_from_fov(fov, aspect=self.image_width / self.image_height).astype(np.float32),
             dtype=torch.float32,
         )
         cam_pos = torch.tensor(camera_position, dtype=torch.float32)
