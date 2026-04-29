@@ -28,7 +28,7 @@ import numpy as np
 import structlog
 import torch
 
-from moq3dgs.decorators import network_bound
+from moq3dgs.decorators import gpu_bound, network_bound
 from moq3dgs.models import (
     ImportanceTier,
     MoQSubscription,
@@ -41,8 +41,6 @@ from moq3dgs.render.rasterizer import render_gaussians
 from moq3dgs.render.writer import FrameWriter
 from moq3dgs.transport.protocol import decode_cluster
 from moq3dgs.viewport.frustum import (
-    Frustum,
-    Visibility,
     check_aabb_frustum,
     extract_frustum,
     projection_matrix_from_fov,
@@ -206,23 +204,30 @@ class MoQClient:
                     pass
 
                 # Binary cluster frame
-                cluster = decode_cluster(data)
-                
-                # Protocol currently encodes ImportanceTier (subgroup_id) in the object_id field.
-                # True MoQ Object serialization will come later.
-                tier = cluster.pop("object_id")
-                cluster["subgroup_id"] = tier
-                cluster["object_id"] = 0
-                
-                self.cache.put(cluster)
-                self._clusters_received += 1
-                logger.debug(
-                    "cluster_received",
-                    track=cluster["track_id"],
-                    group=cluster["group_id"],
-                    tier=tier,
-                    n=cluster["num_gaussians"],
-                )
+                try:
+                    cluster = decode_cluster(data)
+                    # Protocol currently encodes ImportanceTier (subgroup_id) in the object_id field.
+                    tier = cluster.pop("object_id")
+                    cluster["subgroup_id"] = tier
+                    cluster["object_id"] = 0
+                    
+                    # Performance: move to GPU immediately
+                    for k in ["means", "opacities", "sh_coeffs", "scales", "rotations"]:
+                        if cluster.get(k) is not None:
+                            cluster[k] = cluster[k].to(self.device)
+                    
+                    self.cache.put(cluster)
+                    self._clusters_received += 1
+                    self._bytes_received += len(data)
+                    logger.debug(
+                        "cluster_received",
+                        track=cluster["track_id"],
+                        group=cluster["group_id"],
+                        tier=tier,
+                        n=cluster["num_gaussians"],
+                    )
+                except Exception as e:
+                    logger.error("decode_failed", error=str(e))
 
         except (asyncio.CancelledError, ConnectionResetError, asyncio.IncompleteReadError):
             pass
@@ -276,7 +281,7 @@ class MoQClient:
                 np.array(track.bbox_max),
                 frustum,
             )
-            if track_vis == Visibility.OUTSIDE:
+            if track_vis == 0:
                 continue
 
             for group in track.groups:
@@ -285,7 +290,7 @@ class MoQClient:
                     np.array(group.bbox_max),
                     frustum,
                 )
-                if group_vis == Visibility.OUTSIDE:
+                if group_vis == 0:
                     continue
 
                 key = f"{track.track_id}/{group.group_id}"
@@ -333,6 +338,32 @@ class MoQClient:
 
     # -- render loop ---------------------------------------------------------
 
+    def get_visible_keys(self, view_matrix: np.ndarray, fov: float) -> Set[Tuple[str, str]]:
+        """Identify which track/group IDs are visible in the current viewport."""
+        proj = projection_matrix_from_fov(fov, aspect=self.image_width / self.image_height)
+        vp = view_matrix @ proj
+        frust = extract_frustum(vp)
+        
+        visible = set()
+        for track in self.manifest.tracks:
+            # First check the whole track
+            track_vis = check_aabb_frustum(
+                np.array(track.bbox_min), np.array(track.bbox_max), frust
+            )
+            if track_vis == 0:  # OUTSIDE
+                continue
+            
+            # Then check groups within the track
+            for group in track.groups:
+                group_vis = check_aabb_frustum(
+                    np.array(group.bbox_min), np.array(group.bbox_max), frust
+                )
+                if group_vis > 0:  # INSIDE or INTERSECTING
+                    visible.add((track.track_id, group.group_id))
+        
+        return visible
+
+    @gpu_bound
     def render_frame(
         self,
         frame_idx: int,
@@ -358,7 +389,8 @@ class MoQClient:
         if not self.render_enabled:
             return None
 
-        assembled = self.cache.assemble_base()
+        visible_keys = self.get_visible_keys(np.array(view_matrix), fov)
+        assembled = self.cache.assemble_base(device=self.device, visible_keys=visible_keys)
         if assembled is None or assembled["num_gaussians"] == 0:
             logger.debug("render_skip_empty_cache", frame=frame_idx)
             return None
