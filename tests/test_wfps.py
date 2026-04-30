@@ -148,29 +148,29 @@ class TestVoxelFPS:
 
 class TestSplitLoD:
     def test_union_complete(self):
-        """All indices appear across base tiers (no splat lost)."""
+        """All indices appear across quality-0 subsets (no splat lost)."""
         n = 512
         scene = _make_scene(n)
         indices = np.arange(n, dtype=np.int64)
         layers = split_lod(scene, indices, device="cpu")
 
-        # Collect all base indices
+        # Collect all quality=0 indices across all subsets
         base_indices = np.concatenate([
             l.indices for l in layers
-            if l.tier in (ImportanceTier.BASE_LARGE, ImportanceTier.BASE_MEDIUM, ImportanceTier.BASE_SMALL)
+            if l.quality == 0
         ])
         assert len(base_indices) == n, "Splats lost in LoD split"
         assert sorted(base_indices.tolist()) == list(range(n))
 
-    def test_no_overlap_between_base_tiers(self):
-        """Base tiers should not share any index."""
+    def test_no_overlap_between_subsets(self):
+        """Subsets within same quality should not share any index."""
         n = 256
         scene = _make_scene(n)
         indices = np.arange(n, dtype=np.int64)
         layers = split_lod(scene, indices, device="cpu")
         base_layers = [
             l for l in layers
-            if l.tier in (ImportanceTier.BASE_LARGE, ImportanceTier.BASE_MEDIUM, ImportanceTier.BASE_SMALL)
+            if l.quality == 0
         ]
         all_sets = [set(l.indices.tolist()) for l in base_layers]
         for i, s1 in enumerate(all_sets):
@@ -178,17 +178,17 @@ class TestSplitLoD:
                 if i >= j:
                     continue
                 overlap = s1 & s2
-                assert len(overlap) == 0, f"Overlap between tier {i} and {j}: {len(overlap)} indices"
+                assert len(overlap) == 0, f"Overlap between subset {i} and {j}: {len(overlap)} indices"
 
     def test_tier_ordering_small_n(self):
-        """BASE_LARGE gets the smallest fraction (~5%)."""
+        """LARGE gets the smallest fraction (~5%)."""
         n = 1000
         scene = _make_scene(n)
         layers = split_lod(scene, np.arange(n, dtype=np.int64), device="cpu")
-        large = next(l for l in layers if l.tier == ImportanceTier.BASE_LARGE)
-        small = next(l for l in layers if l.tier == ImportanceTier.BASE_SMALL)
+        large = next(l for l in layers if l.tier == ImportanceTier.LARGE and l.quality == 0)
+        small = next(l for l in layers if l.tier == ImportanceTier.SMALL and l.quality == 0)
         assert large.num_gaussians < small.num_gaussians, (
-            "BASE_LARGE should have fewer splats than BASE_SMALL"
+            "LARGE should have fewer splats than SMALL"
         )
 
     def test_empty_cluster(self):

@@ -28,7 +28,7 @@ class TestPriority:
             cluster_bbox_min=np.array([-1, -1, -5]),
             cluster_bbox_max=np.array([1, 1, -3]),
             frustum=frustum,
-            subgroup_id=ImportanceTier.BASE_LARGE,
+            subgroup_id=ImportanceTier.LARGE,
             max_distance=50.0,
         )
         assert p < 50, f"Expected high priority (<50) but got {p}"
@@ -42,13 +42,13 @@ class TestPriority:
             cluster_bbox_min=np.array([-1, -1, 40]),
             cluster_bbox_max=np.array([1, 1, 50]),
             frustum=frustum,
-            subgroup_id=ImportanceTier.ENHANCE_MEDIUM,
+            subgroup_id=ImportanceTier.SMALL,
             max_distance=50.0,
         )
         assert p > 150, f"Expected low priority (>150) but got {p}"
 
     def test_base_beats_enhancement(self) -> None:
-        """Same position, base should beat enhancement."""
+        """Same position, large should beat small."""
         frustum = _default_frustum()
         kwargs = dict(
             camera_pos=np.array([0, 0, 0]),
@@ -58,8 +58,8 @@ class TestPriority:
             frustum=frustum,
             max_distance=50.0,
         )
-        p_base = compute_priority(**kwargs, subgroup_id=ImportanceTier.BASE_LARGE)
-        p_enh = compute_priority(**kwargs, subgroup_id=ImportanceTier.ENHANCE_MEDIUM)
+        p_base = compute_priority(**kwargs, subgroup_id=ImportanceTier.LARGE)
+        p_enh = compute_priority(**kwargs, subgroup_id=ImportanceTier.SMALL)
         assert p_base < p_enh
 
     def test_priority_in_range(self) -> None:
@@ -72,6 +72,6 @@ class TestPriority:
                 cluster_bbox_min=np.array([-1, -1, -dist - 1]),
                 cluster_bbox_max=np.array([1, 1, -dist]),
                 frustum=frustum,
-                subgroup_id=ImportanceTier.BASE_LARGE,
+                subgroup_id=ImportanceTier.LARGE,
             )
             assert 0 <= p <= 255

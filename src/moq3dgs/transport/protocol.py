@@ -19,7 +19,7 @@ Frame format
        16..19   object_id      (uint32)
        20..23   num_gaussians  (uint32)
        24..27   payload_len    (uint32)
-       28..31   reserved       (uint32)  0
+       28..31   subgroup_id    (uint32)
 
     Payload:
         track_id bytes, group_id bytes, then attribute arrays in
@@ -47,6 +47,7 @@ HEADER_FMT = "<8I"  # 8 × uint32
 def encode_cluster(
     track_id: str,
     group_id: str,
+    subgroup_id: int,
     object_id: int,
     num_gaussians: int,
     means: Optional[torch.Tensor] = None,
@@ -108,7 +109,7 @@ def encode_cluster(
         object_id,
         num_gaussians,
         len(payload),
-        0,  # reserved
+        subgroup_id,
     )
     return bytes(header) + bytes(payload)
 
@@ -140,7 +141,7 @@ def decode_cluster(data: bytes) -> dict:
         object_id,
         num_gaussians,
         payload_len,
-        _reserved,
+        subgroup_id,
     ) = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
 
     if magic != MAGIC:
@@ -183,11 +184,13 @@ def decode_cluster(data: bytes) -> dict:
         scales = scales.reshape(num_gaussians, 3)
     if rotations is not None:
         rotations = rotations.reshape(num_gaussians, 4)
-    # sh_coeffs shape depends on LoD; leave flat for caller to reshape
+    if sh_coeffs is not None:
+        sh_coeffs = sh_coeffs.reshape(num_gaussians, -1)
 
     return {
         "track_id": track_id,
         "group_id": group_id,
+        "subgroup_id": subgroup_id,
         "object_id": object_id,
         "num_gaussians": num_gaussians,
         "means": means,

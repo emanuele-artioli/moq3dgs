@@ -64,13 +64,11 @@ def _frustum_score(
 
 
 def _lod_score(tier: ImportanceTier) -> float:
-    """Base geometry (0-2) gets highest priority boost, enhancements (3-4) get less."""
+    """Large splats (skeleton) get highest priority boost."""
     scores = {
-        ImportanceTier.BASE_LARGE: 0.0,
-        ImportanceTier.BASE_MEDIUM: 0.05,
-        ImportanceTier.BASE_SMALL: 0.10,
-        ImportanceTier.ENHANCE_LARGE: 0.20,
-        ImportanceTier.ENHANCE_MEDIUM: 0.30,
+        ImportanceTier.LARGE: 0.0,
+        ImportanceTier.MEDIUM: 0.10,
+        ImportanceTier.SMALL: 0.20,
     }
     return scores.get(tier, 0.5)
 

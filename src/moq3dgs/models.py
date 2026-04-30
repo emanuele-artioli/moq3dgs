@@ -18,20 +18,14 @@ from pydantic import BaseModel, Field
 
 
 class ImportanceTier(IntEnum):
-    """Importance Tiers mapped to MoQ Subgroups.
-
-    Subgroup 0: Large Splats (Geometry + SH0)
-    Subgroup 1: Medium Splats (Geometry + SH0)
-    Subgroup 2: Small Splats (Geometry + SH0)
-    Subgroup 3: Large Splats (SH1-SH3)
-    Subgroup 4: Medium/Small Splats (SH1-SH3)
+    """Categorisation of Gaussians based on their spatial contribution.
+    
+    Subsets are ordered by their contribution to the scene's primary 
+    structure (skeleton).
     """
-
-    BASE_LARGE = 0
-    BASE_MEDIUM = 1
-    BASE_SMALL = 2
-    ENHANCE_LARGE = 3
-    ENHANCE_MEDIUM = 4
+    LARGE = 0   # Top 5% WFPS coverage
+    MEDIUM = 1  # Next 15% WFPS coverage
+    SMALL = 2   # Remaining 80% coverage
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +60,11 @@ class MoQSubscription(BaseModel):
 
     track_id: str
     group_id: str
-    min_subgroup_id: int = Field(
-        0, ge=0, le=4, description="Minimum LoD tier to send (default 0)"
+    subgroup_id: int = Field(
+        ..., ge=0, le=2, description="Splat subset (0=Large, 1=Medium, 2=Small)"
     )
-    max_subgroup_id: int = Field(
-        ..., ge=0, le=4, description="Maximum LoD tier to send"
+    quality_level: int = Field(
+        0, ge=0, le=1, description="Quality level (0=Base SH0, 1=Full SH0-3)"
     )
     priority: int = Field(
         ..., ge=0, le=255, description="0=highest, 255=lowest"

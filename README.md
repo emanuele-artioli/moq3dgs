@@ -95,6 +95,27 @@ src/moq3dgs/
 └── client_app.py       # Client entry point
 ```
 
+## Adaptive Bitrate & Budget Management
+
+The system implements a multi-layer adaptive strategy to ensure visual fidelity and real-time performance:
+
+### 1. Spatial-Aware LoD (Server-Side)
+Gaussians are partitioned into 3 **Subsets** (Large, Medium, Small) using **Weighted Farthest-Point Sampling (WFPS)**. Each subset is available in 2 **Quality Levels**:
+- **Quality 0 (Base)**: Essential geometry + DC color (SH0). Self-contained.
+- **Quality 1 (Full)**: Adds high-frequency detail (SH1-3).
+
+### 2. Breadth-First ABR (Client-Side)
+The client follows a "fill-then-upgrade" strategy:
+- **Base Coverage**: Subscribes to Quality 0 for all visible subsets (Large → Medium → Small).
+- **Detail Enhancement**: Once Quality 0 is received for visible clusters, it upgrades to Quality 1.
+- **Persistence**: Subscriptions are maintained as long as clusters are near the viewport to prevent "popping".
+
+### 3. Adaptive Rendering Budget
+To maintain a target of **24 FPS (40ms/frame)**, the client dynamically manages a **Gaussian Budget**:
+- **Halo Culling**: Visibility testing uses a 20% margin (halo) to prevent edge popping.
+- **Priority Ranking**: Visible clusters are ranked by Distance, Centeredness, and Layer type.
+- **Dynamic Feedback**: If render time exceeds 40ms, the budget (max splats) is reduced. If under 30ms, it is increased to allow higher detail.
+
 ## Priority Scheme
 
 Priority `0` (highest) → `255` (lowest), computed dynamically:
@@ -102,6 +123,12 @@ Priority `0` (highest) → `255` (lowest), computed dynamically:
 1. **Distance to camera** — closer = higher priority
 2. **Frustum position** — centre = highest, periphery = medium, behind = lowest
 3. **Importance Tier (Subgroup)** — Subgroups 0-2 (Base Geometry) > Subgroups 3-4 (SH Reflections). Priorities ebb and flow based on the viewport, but geometry always maintains a baseline priority over reflections.
+
+## Next Steps
+
+- [ ] Implement occlusion culling for indoor scenes (Track-level visibility based on portals).
+- [ ] Transition from TCP placeholder to full QUIC transport using `aioquic`.
+- [ ] Add support for dynamic LoD transitions using alpha-blending to prevent "popping" between tiers.
 
 ## License
 

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+import torch
 import structlog
 
 from moq3dgs.decorators import network_bound
@@ -143,24 +144,34 @@ class MoQServer:
         if not cluster:
             return
 
-        # Send requested LoD layers
+        # Send requested LoD layer
+        # Subgroup ID (0,1,2) maps to LoD tier, Quality (0,1) maps to Object ID.
         for lod in self.lod_cache.get(cid, []):
-            if not (sub.min_subgroup_id <= int(lod.tier) <= sub.max_subgroup_id):
-                continue
+            if int(lod.tier) == sub.subgroup_id and lod.quality == sub.quality_level:
+                sh = (lod.sh_dc.reshape(lod.num_gaussians, -1)
+                      if lod.sh_dc is not None
+                      else (lod.sh_rest.reshape(lod.num_gaussians, -1)
+                            if lod.sh_rest is not None else None))
                 
-            sh = (lod.sh_dc.reshape(lod.num_gaussians, -1)
-                  if lod.sh_dc is not None
-                  else (lod.sh_rest.reshape(lod.num_gaussians, -1)
-                        if lod.sh_rest is not None else None))
-            sc = lod.scales_base if lod.scales_base is not None else lod.scales_delta
-            frame = encode_cluster(
-                sub.track_id, sub.group_id,
-                int(lod.tier), lod.num_gaussians,
-                lod.means, lod.opacities, sh, sc, lod.rotations,
-            )
-            await self._send_binary(session.writer, frame)
-            session.bytes_sent += len(frame)
-            self._total_bytes_sent += len(frame)
+                # Combine SH0 and SH1-3 if quality is 1
+                if lod.quality == 1 and lod.sh_rest is not None and lod.sh_dc is not None:
+                     sh = torch.cat([lod.sh_dc.reshape(lod.num_gaussians, -1),
+                                   lod.sh_rest.reshape(lod.num_gaussians, -1)], dim=1)
+
+                frame = encode_cluster(
+                    sub.track_id, sub.group_id,
+                    subgroup_id=sub.subgroup_id,
+                    object_id=lod.quality,
+                    num_gaussians=lod.num_gaussians,
+                    means=lod.means,
+                    opacities=lod.opacities,
+                    sh_coeffs=sh,
+                    scales=lod.scales_base,
+                    rotations=lod.rotations,
+                )
+                await self._send_binary(session.writer, frame)
+                session.bytes_sent += len(frame)
+                self._total_bytes_sent += len(frame)
 
     @staticmethod
     async def _send_json(w: asyncio.StreamWriter, obj: dict) -> None:

@@ -129,3 +129,47 @@ class SplatCache:
             self._cached_device = device
             self._dirty = False
             return result
+    def assemble_specific(self, device: str = "cpu", keys: Optional[Set[Tuple[str, str, int, int]]] = None) -> Optional[dict]:
+        """Concatenate a specific set of clusters for rendering.
+        
+        Args:
+            device: Target device.
+            keys: Set of (track_id, group_id, subgroup_id, object_id) to include.
+        """
+        if keys is None:
+            return self.assemble_base(device=device)
+
+        with self._lock:
+            entries = [self._store[k] for k in keys if k in self._store]
+            
+            if not entries:
+                return None
+
+            def _cat(key: str) -> Optional[torch.Tensor]:
+                parts = [e[key] for e in entries if e.get(key) is not None]
+                if not parts:
+                    return None
+                
+                if key == "sh_coeffs":
+                    # Handle mixed SH widths by padding to the maximum width
+                    max_width = max(p.shape[1] for p in parts)
+                    padded_parts = []
+                    for p in parts:
+                        if p.shape[1] < max_width:
+                            padding = torch.zeros((p.shape[0], max_width - p.shape[1]), 
+                                                device=p.device, dtype=p.dtype)
+                            padded_parts.append(torch.cat([p, padding], dim=1))
+                        else:
+                            padded_parts.append(p)
+                    parts = padded_parts
+
+                return torch.cat(parts, dim=0).to(device)
+
+            return {
+                "means": _cat("means"),
+                "opacities": _cat("opacities"),
+                "sh_coeffs": _cat("sh_coeffs"),
+                "scales": _cat("scales"),
+                "rotations": _cat("rotations"),
+                "num_gaussians": sum(e["num_gaussians"] for e in entries),
+            }

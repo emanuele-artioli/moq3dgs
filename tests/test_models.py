@@ -59,17 +59,18 @@ class TestMoQSubscription:
         sub = MoQSubscription(
             track_id="track-0001",
             group_id="group-0001-0",
-            max_subgroup_id=1,
+            subgroup_id=1,
+            quality_level=0,
             priority=128,
         )
-        assert sub.max_subgroup_id == 1
+        assert sub.subgroup_id == 1
         assert sub.priority == 128
 
     def test_priority_out_of_range(self) -> None:
         with pytest.raises(Exception):
             MoQSubscription(
                 track_id="t", group_id="g",
-                max_subgroup_id=0, priority=300,
+                subgroup_id=0, quality_level=0, priority=300,
             )
 
 
@@ -105,5 +106,5 @@ class TestSceneManifest:
 
 class TestImportanceTier:
     def test_enum_values(self):
-        assert ImportanceTier.BASE_LARGE == 0
-        assert ImportanceTier.ENHANCE_MEDIUM == 4
+        assert ImportanceTier.LARGE == 0
+        assert ImportanceTier.SMALL == 2

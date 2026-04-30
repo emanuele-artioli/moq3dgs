@@ -106,7 +106,14 @@ class MoQClient:
             height=self.image_height
         )
         self._subscribed_tiers: Dict[str, int] = {}  # key → last-requested tier
-
+        
+        # Adaptive Budget Management
+        self._gaussian_budget = 5_000_000  # Start with 5M splat budget
+        self._last_render_ms = 33.3        # Target ~30 FPS baseline
+        self._budget_increase_rate = 1.1   # +10% if fast
+        self._budget_decrease_rate = 0.9   # -10% if slow
+        self._perf_target_ms = 40.0        # 24 FPS target threshold
+        self._perf_low_threshold_ms = 30.0 # Threshold to increase budget
         # Metrics
         self._bytes_received = 0
         self._clusters_received = 0
@@ -206,10 +213,8 @@ class MoQClient:
                 # Binary cluster frame
                 try:
                     cluster = decode_cluster(data)
-                    # Protocol currently encodes ImportanceTier (subgroup_id) in the object_id field.
-                    tier = cluster.pop("object_id")
-                    cluster["subgroup_id"] = tier
-                    cluster["object_id"] = 0
+                    # New protocol uses object_id as quality_level
+                    quality = cluster["object_id"]
                     
                     # Performance: move to GPU immediately
                     for k in ["means", "opacities", "sh_coeffs", "scales", "rotations"]:
@@ -223,7 +228,8 @@ class MoQClient:
                         "cluster_received",
                         track=cluster["track_id"],
                         group=cluster["group_id"],
-                        tier=tier,
+                        subgroup_id=cluster["subgroup_id"],
+                        quality=cluster["object_id"],
                         n=cluster["num_gaussians"],
                     )
                 except Exception as e:
@@ -313,7 +319,7 @@ class MoQClient:
                     np.array(group.bbox_min),
                     np.array(group.bbox_max),
                     frustum,
-                    ImportanceTier.BASE_LARGE,
+                    ImportanceTier.LARGE,
                 )
                 candidates.append((priority, track.track_id, group.group_id))
 
@@ -325,35 +331,55 @@ class MoQClient:
         # We track per-group which tier was last subscribed in _subscribed_tiers.
         for priority, track_id, group_id in candidates:
             key = f"{track_id}/{group_id}"
-            current_tier = self._subscribed_tiers.get(key, -1)
+            
+            # current_state is a tuple (max_subgroup, max_quality)
+            state = self._subscribed_tiers.get(key, (-1, 0))
+            curr_sub, curr_qual = state
 
-            if current_tier >= int(ImportanceTier.ENHANCE_MEDIUM):
-                continue  # Already fully subscribed
-
-            next_tier = current_tier + 1  # Subscribe one tier at a time
+            # Breadth-first progression:
+            # 1. Fill all visible subsets with Base quality (Quality 0)
+            # 2. Then upgrade them to Full quality (Quality 1)
+            
+            if curr_sub < 2:
+                # Upgrade subset (stay at Base quality)
+                next_sub = curr_sub + 1
+                next_qual = 0
+            elif curr_qual < 1:
+                # All subsets present at Base quality, now upgrade to Full
+                # Start upgrading from Subset 0 again? 
+                # For simplicity, we upgrade the whole group to Quality 1
+                # but we do it subset by subset.
+                # Actually, let's just upgrade to Quality 1 for Subset 0, then 1, then 2.
+                # To track this, we might need a more complex state.
+                # Let's say: (sub, qual)
+                # (0,0) -> (1,0) -> (2,0) -> (0,1) -> (1,1) -> (2,1)
+                next_sub = 0
+                next_qual = 1
+            else:
+                continue # Fully subscribed at max quality
 
             await self._subscribe(
                 track_id, group_id,
-                min_subgroup_id=next_tier,
-                max_subgroup_id=next_tier,
+                subgroup_id=next_sub,
+                quality_level=next_qual,
                 priority=priority,
             )
-            self._subscribed_tiers[key] = next_tier
+            self._subscribed_tiers[key] = (next_sub, next_qual)
 
     async def _subscribe(
         self,
         track_id: str,
         group_id: str,
-        min_subgroup_id: int = 0,
-        max_subgroup_id: int = 4,
+        subgroup_id: int = 0,
+        quality_level: int = 0,
         priority: int = 128,
     ) -> None:
         """Send a MoQ subscription request."""
         sub = MoQSubscription(
             track_id=track_id,
             group_id=group_id,
-            min_subgroup_id=min_subgroup_id,
-            max_subgroup_id=max_subgroup_id,
+            subgroup_id=subgroup_id,
+            quality_level=quality_level,
             priority=priority,
         )
         await self._send_json({
@@ -364,16 +390,23 @@ class MoQClient:
             "subscribed",
             track=track_id,
             group=group_id,
-            tier=max_subgroup_id,
+            subgroup_id=subgroup_id,
+            quality=quality_level,
             priority=priority,
         )
 
 
     # -- render loop ---------------------------------------------------------
 
-    def get_visible_keys(self, view_matrix: np.ndarray, fov: float) -> Set[Tuple[str, str]]:
-        """Identify which track/group IDs are visible in the current viewport."""
-        proj = projection_matrix_from_fov(fov, aspect=self.image_width / self.image_height)
+    def get_visible_keys(self, view_matrix: np.ndarray, fov: float, margin: float = 0.2) -> Set[Tuple[str, str]]:
+        """Identify which track/group IDs are visible in the current viewport.
+        
+        Uses a 'halo' frustum (expanded by margin) to prevent objects from 
+        popping in/out at the edges of the screen.
+        """
+        # Expand FOV by margin to include a halo of off-screen clusters
+        relaxed_fov = min(179.0, fov * (1.0 + margin))
+        proj = projection_matrix_from_fov(relaxed_fov, aspect=self.image_width / self.image_height)
         vp = proj @ view_matrix
         frust = extract_frustum(vp)
         
@@ -422,20 +455,81 @@ class MoQClient:
         if not self.render_enabled:
             return None
 
-        visible_keys = self.get_visible_keys(np.array(view_matrix), fov)
-        assembled = self.cache.assemble_base(device=self.device, visible_keys=visible_keys)
+        # 1. Compute view state for prioritisation
+        vm_np = np.array(view_matrix)
+        proj_np = projection_matrix_from_fov(fov, aspect=self.image_width / self.image_height)
+        vp_np = proj_np @ vm_np
+        frust = extract_frustum(vp_np)
+        cam_fwd = camera_forward_from_view_matrix(view_matrix)
+        cam_pos_np = np.array(camera_position)
+
+        # 2. Get visible clusters with a halo margin (prevents edge popping)
+        visible_keys = self.get_visible_keys(vm_np, fov, margin=0.2)
+        
+        # 3. Prioritise visible clusters for budget management
+        # We want to fill the budget with the highest priority clusters first.
+        scored_candidates = []
+        # Access tracks via manifest to get BBoxes
+        track_lookup = {t.track_id: t for t in self.manifest.tracks}
+        
+        for tid, gid in visible_keys:
+            # We only care about cached clusters
+            track = track_lookup.get(tid)
+            if not track: continue
+            group = next((g for g in track.groups if g.group_id == gid), None)
+            if not group: continue
+
+            # Priority 0 = highest, 255 = lowest
+            p = compute_priority(
+                cam_pos_np, cam_fwd,
+                np.array(group.bbox_min), np.array(group.bbox_max),
+                frust, ImportanceTier.LARGE
+            )
+            
+            # Add subsets 0, 1, 2 to the candidate pool
+            for sub in range(3):
+                # Pick BEST available quality for this subset
+                best_q = -1
+                if self.cache.has(tid, gid, sub, 1):
+                    best_q = 1
+                elif self.cache.has(tid, gid, sub, 0):
+                    best_q = 0
+                
+                if best_q >= 0:
+                    cluster = self.cache.get(tid, gid, sub, best_q)
+                    # Priority for budget: Base geometry (sub 0) > others.
+                    # Quality 1 gets a slight priority boost to prefer detail if budget allows.
+                    scored_candidates.append({
+                        "key": (tid, gid, sub, best_q),
+                        "priority": p + (sub * 50) - (best_q * 10),
+                        "n": cluster["num_gaussians"]
+                    })
+
+        # Sort by priority (ascending: 0 is best)
+        scored_candidates.sort(key=lambda x: x["priority"])
+
+        # 4. Fill budget
+        selected_keys = set()
+        current_n = 0
+        for cand in scored_candidates:
+            if current_n + cand["n"] > self._gaussian_budget:
+                break
+            selected_keys.add((cand["key"][0], cand["key"][1], cand["key"][2], cand["key"][3]))
+            current_n += cand["n"]
+
+        # 5. Assemble and render
+        # We pass a flat list of keys to assemble_base (customised call)
+        assembled = self.cache.assemble_specific(device=self.device, keys=selected_keys)
+        
         if assembled is None or assembled["num_gaussians"] == 0:
-            logger.debug("render_skip_empty_cache", frame=frame_idx)
+            logger.debug("render_skip_empty_budget", frame=frame_idx, budget=self._gaussian_budget)
             return None
 
         t0 = time.perf_counter()
 
-        vm = torch.tensor(view_matrix, dtype=torch.float32)
-        proj = torch.tensor(
-            projection_matrix_from_fov(fov, aspect=self.image_width / self.image_height).astype(np.float32),
-            dtype=torch.float32,
-        )
-        cam_pos = torch.tensor(camera_position, dtype=torch.float32)
+        vm = torch.tensor(vm_np, dtype=torch.float32)
+        proj = torch.tensor(proj_np.astype(np.float32), dtype=torch.float32)
+        cam_pos = torch.tensor(cam_pos_np, dtype=torch.float32)
 
         image = render_gaussians(
             means=assembled["means"],
@@ -448,11 +542,12 @@ class MoQClient:
             camera_pos=cam_pos,
             image_width=self.image_width,
             image_height=self.image_height,
-            fov_y_deg=fov,
             device=self.device,
         )
 
         render_time = time.perf_counter() - t0
+        render_ms = render_time * 1000
+        self._last_render_ms = render_ms
         self._frames_rendered += 1
 
         metrics = {

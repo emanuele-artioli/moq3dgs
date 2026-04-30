@@ -53,6 +53,8 @@ class LoDLayer:
     """
 
     tier: ImportanceTier
+    quality: int # 0=Base, 1=Full
+    num_gaussians: int
     indices: np.ndarray
 
     # Base attributes (present in BASE_* tiers)
@@ -65,10 +67,6 @@ class LoDLayer:
     # Enhancement attributes (present in ENHANCE_* tiers)
     sh_rest: torch.Tensor | None = None
     scales_delta: torch.Tensor | None = None
-
-    @property
-    def num_gaussians(self) -> int:
-        return len(self.indices)
 
 
 # ---------------------------------------------------------------------------
@@ -227,47 +225,41 @@ def split_lod(
         scene, idx, device=compute_device
     )
 
-    layers: List[LoDLayer] = []
-
-    def make_base(tier: ImportanceTier, sub_idx: np.ndarray) -> LoDLayer | None:
-        if len(sub_idx) == 0:
+    def make_layer(subset_id: int, quality: int, indices: np.ndarray) -> LoDLayer | None:
+        if len(indices) == 0:
             return None
-        t = torch.from_numpy(sub_idx).long()
+        
+        t = torch.from_numpy(indices).long()
+        # Quality 0: SH0 only
+        # Quality 1: Full SH (SH0-3)
+        sh_dc = scene.sh_dc[t]
+        sh_rest = scene.sh_rest[t] if quality == 1 else None
+        
         return LoDLayer(
-            tier=tier,
-            indices=sub_idx,
+            tier=subset_id,
+            quality=quality,
+            num_gaussians=len(indices),
+            indices=indices,
             means=scene.means[t],
             opacities=scene.opacities[t],
-            sh_dc=scene.sh_dc[t],
-            rotations=scene.rotations[t],
+            sh_dc=sh_dc,
+            sh_rest=sh_rest,
             scales_base=scene.scales[t],
+            rotations=scene.rotations[t],
         )
 
-    def make_enhance(tier: ImportanceTier, sub_idx: np.ndarray) -> LoDLayer | None:
-        if len(sub_idx) == 0 or scene.sh_rest.shape[1] == 0:
-            return None
-        t = torch.from_numpy(sub_idx).long()
-        return LoDLayer(
-            tier=tier,
-            indices=sub_idx,
-            sh_rest=scene.sh_rest[t],
-            scales_delta=torch.zeros_like(scene.scales[t]),
-        )
+    layers = []
+    # Subset 0: Large (5%)
+    layers.append(make_layer(0, 0, idx_large))
+    layers.append(make_layer(0, 1, idx_large))
+    
+    # Subset 1: Medium (15%)
+    layers.append(make_layer(1, 0, idx_medium))
+    layers.append(make_layer(1, 1, idx_medium))
+    
+    # Subset 2: Small (80%)
+    layers.append(make_layer(2, 0, idx_small))
+    layers.append(make_layer(2, 1, idx_small))
 
-    l0 = make_base(ImportanceTier.BASE_LARGE, idx_large)
-    l1 = make_base(ImportanceTier.BASE_MEDIUM, idx_medium)
-    l2 = make_base(ImportanceTier.BASE_SMALL, idx_small)
-    l3 = make_enhance(ImportanceTier.ENHANCE_LARGE, idx_large)
+    return [l for l in layers if l is not None]
 
-    idx_med_small = (
-        np.concatenate([idx_medium, idx_small])
-        if len(idx_medium) + len(idx_small) > 0
-        else np.array([], dtype=np.int64)
-    )
-    l4 = make_enhance(ImportanceTier.ENHANCE_MEDIUM, idx_med_small)
-
-    for layer in [l0, l1, l2, l3, l4]:
-        if layer is not None:
-            layers.append(layer)
-
-    return layers
