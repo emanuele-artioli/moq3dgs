@@ -77,7 +77,7 @@ class MoQClient:
         port: int = 4433,
         client_id: str = "client-0",
         output_dir: str | Path = "./output",
-        device: str = "cuda:0",
+        device: str = "cuda:1",
         image_width: int = 1920,
         image_height: int = 1080,
         render_enabled: bool = True,
@@ -105,7 +105,7 @@ class MoQClient:
             width=self.image_width, 
             height=self.image_height
         )
-        self._subscribed: Set[str] = set()  # "track/group" keys
+        self._subscribed_tiers: Dict[str, int] = {}  # key → last-requested tier
 
         # Metrics
         self._bytes_received = 0
@@ -254,9 +254,22 @@ class MoQClient:
     async def send_viewport_update(self, update: ViewportUpdate) -> None:
         """Send a viewport update and subscribe to newly visible clusters.
 
-        The client computes the view frustum, checks the manifest for
-        visible tracks/groups, diffs against its SplatCache, and sends
-        subscriptions for anything missing.
+        Subscription strategy (viewport-aware ABR):
+        ─────────────────────────────────────────────
+        1. Compute the view frustum from the camera pose.
+        2. For every visible track/group in the manifest, compute a
+           *priority score* (distance + screen position).
+        3. Sort visible groups by priority (closest/central = first).
+        4. Issue subscriptions **breadth-first by Importance Tier**:
+           - First pass: subscribe all unsubscribed visible groups for
+             BASE_LARGE (tier 0) only.  This gives the entire visible
+             scene a coarse skeleton quickly.
+           - Second pass (next frame): request BASE_MEDIUM (tier 0+1) for
+             groups already seen.
+           - And so on up to ENHANCE_MEDIUM (tier 4, full quality).
+
+        This prevents the "one cluster looks great, rest is black" problem
+        that occurs when all tiers of one group are fetched before others.
         """
         assert self._writer is not None
         assert self.manifest is not None
@@ -274,7 +287,8 @@ class MoQClient:
         camera_pos = np.array(update.camera_position, dtype=np.float64)
         camera_fwd = camera_forward_from_view_matrix(update.view_matrix)
 
-        # Check each track/group visibility and subscribe if not cached
+        # ── Step 1: collect and prioritise visible groups ────────────────────
+        candidates: list[tuple[int, str, str]] = []  # (priority, track_id, group_id)
         for track in self.manifest.tracks:
             track_vis = check_aabb_frustum(
                 np.array(track.bbox_min),
@@ -293,28 +307,44 @@ class MoQClient:
                 if group_vis == 0:
                     continue
 
-                key = f"{track.track_id}/{group.group_id}"
-                # Only subscribe if not already cached (base layer)
-                if not self.cache.has(track.track_id, group.group_id, 0, 0):
-                    if key not in self._subscribed:
-                        priority = compute_priority(
-                            camera_pos,
-                            camera_fwd,
-                            np.array(group.bbox_min),
-                            np.array(group.bbox_max),
-                            frustum,
-                            ImportanceTier.BASE_LARGE,
-                        )
-                        await self._subscribe(
-                            track.track_id, group.group_id,
-                            max_subgroup_id=4, priority=priority,
-                        )
-                        self._subscribed.add(key)
+                priority = compute_priority(
+                    camera_pos,
+                    camera_fwd,
+                    np.array(group.bbox_min),
+                    np.array(group.bbox_max),
+                    frustum,
+                    ImportanceTier.BASE_LARGE,
+                )
+                candidates.append((priority, track.track_id, group.group_id))
+
+        # Sort ascending = highest priority (0 = best) first
+        candidates.sort(key=lambda x: x[0])
+
+        # ── Step 2: breadth-first tier subscription ──────────────────────────
+        # For each visible group, determine the *next* tier to request.
+        # We track per-group which tier was last subscribed in _subscribed_tiers.
+        for priority, track_id, group_id in candidates:
+            key = f"{track_id}/{group_id}"
+            current_tier = self._subscribed_tiers.get(key, -1)
+
+            if current_tier >= int(ImportanceTier.ENHANCE_MEDIUM):
+                continue  # Already fully subscribed
+
+            next_tier = current_tier + 1  # Subscribe one tier at a time
+
+            await self._subscribe(
+                track_id, group_id,
+                min_subgroup_id=next_tier,
+                max_subgroup_id=next_tier,
+                priority=priority,
+            )
+            self._subscribed_tiers[key] = next_tier
 
     async def _subscribe(
         self,
         track_id: str,
         group_id: str,
+        min_subgroup_id: int = 0,
         max_subgroup_id: int = 4,
         priority: int = 128,
     ) -> None:
@@ -322,6 +352,7 @@ class MoQClient:
         sub = MoQSubscription(
             track_id=track_id,
             group_id=group_id,
+            min_subgroup_id=min_subgroup_id,
             max_subgroup_id=max_subgroup_id,
             priority=priority,
         )
@@ -333,15 +364,17 @@ class MoQClient:
             "subscribed",
             track=track_id,
             group=group_id,
+            tier=max_subgroup_id,
             priority=priority,
         )
+
 
     # -- render loop ---------------------------------------------------------
 
     def get_visible_keys(self, view_matrix: np.ndarray, fov: float) -> Set[Tuple[str, str]]:
         """Identify which track/group IDs are visible in the current viewport."""
         proj = projection_matrix_from_fov(fov, aspect=self.image_width / self.image_height)
-        vp = view_matrix @ proj
+        vp = proj @ view_matrix
         frust = extract_frustum(vp)
         
         visible = set()

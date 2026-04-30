@@ -50,6 +50,10 @@ def parse_args() -> argparse.Namespace:
         help="Bind port.",
     )
     parser.add_argument(
+        "--device", type=str, default="cpu",
+        help="Compute device for WFPS preprocessing (e.g. cpu, cuda:0, cuda:1).",
+    )
+    parser.add_argument(
         "--log-level", type=str, default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity.",
@@ -72,6 +76,7 @@ def main() -> None:
         num_clusters=args.clusters,
         host=args.host,
         port=args.port,
+        device=args.device,
     )
 
     try:

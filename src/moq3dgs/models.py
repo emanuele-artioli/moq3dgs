@@ -66,8 +66,11 @@ class MoQSubscription(BaseModel):
 
     track_id: str
     group_id: str
+    min_subgroup_id: int = Field(
+        0, ge=0, le=4, description="Minimum LoD tier to send (default 0)"
+    )
     max_subgroup_id: int = Field(
-        ..., ge=0, le=4, description="Requested LoD tier (0=base large, 4=full)"
+        ..., ge=0, le=4, description="Maximum LoD tier to send"
     )
     priority: int = Field(
         ..., ge=0, le=255, description="0=highest, 255=lowest"

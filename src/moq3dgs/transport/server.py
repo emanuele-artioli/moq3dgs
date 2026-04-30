@@ -143,9 +143,9 @@ class MoQServer:
         if not cluster:
             return
 
-        # Send all requested LoD layers
+        # Send requested LoD layers
         for lod in self.lod_cache.get(cid, []):
-            if lod.tier > sub.max_subgroup_id:
+            if not (sub.min_subgroup_id <= int(lod.tier) <= sub.max_subgroup_id):
                 continue
                 
             sh = (lod.sh_dc.reshape(lod.num_gaussians, -1)
@@ -195,15 +195,46 @@ class MoQServer:
 def create_server(
     scene_path: str | Path, num_clusters: int = 64,
     host: str = "0.0.0.0", port: int = 4433,
+    device: str = "cpu",
 ) -> MoQServer:
-    """Load scene → cluster → build manifest → return server."""
+    """Load scene → cluster → build WFPS-ordered LoD cache → return server.
+
+    The WFPS computation is the offline preprocessing step.  It runs once
+    at startup and assigns each Gaussian in every cluster to an Importance
+    Tier that maximises spatial coverage from the base layer upward.
+
+    Args:
+        scene_path:   Path to PLY file or directory containing one.
+        num_clusters: Number of spatial groups (K-means clusters).
+        host:         Bind address.
+        port:         Listen port.
+        device:       Compute device for WFPS (``"cpu"`` or ``"cuda:X"``).  
+                      Using a GPU dramatically speeds up preprocessing for
+                      small clusters; the voxel approximation is used
+                      automatically for larger ones.
+    """
     ply = find_ply_in_scene_dir(scene_path)
     logger.info("loading_scene", path=str(ply))
     scene = load_ply(ply)
     logger.info("scene_loaded", n=scene.num_gaussians)
     clusters = cluster_gaussians_kmeans(scene, num_clusters=num_clusters)
+
+    logger.info(
+        "wfps_preprocessing_start",
+        num_clusters=len(clusters),
+        device=device,
+        note="offline step, runs once",
+    )
     lod_cache: Dict[int, List[LoDLayer]] = {}
-    for cid, c in clusters.items():
-        lod_cache[cid] = split_lod(scene, c.indices)
+    for i, (cid, c) in enumerate(clusters.items()):
+        lod_cache[cid] = split_lod(scene, c.indices, device=device)
+        if (i + 1) % max(1, len(clusters) // 8) == 0 or (i + 1) == len(clusters):
+            logger.info(
+                "wfps_preprocessing_progress",
+                done=i + 1,
+                total=len(clusters),
+            )
+
     manifest = build_manifest_from_clusters(clusters)
+    logger.info("wfps_preprocessing_done")
     return MoQServer(scene, clusters, manifest, lod_cache, host, port)

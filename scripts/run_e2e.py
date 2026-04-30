@@ -53,6 +53,7 @@ async def run_e2e(
         num_clusters=num_clusters,
         host="127.0.0.1",
         port=port,
+        device=device,
     )
     await server.start()
 

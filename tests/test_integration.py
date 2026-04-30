@@ -69,6 +69,7 @@ async def test_server_client_roundtrip() -> None:
                 port=port,
                 output_dir=tmpdir,
                 render_enabled=False,  # skip rendering in unit tests
+                device="cpu",
             )
             manifest = await client.connect()
             assert len(manifest.tracks) > 0
@@ -153,6 +154,8 @@ async def test_client_render_cpu_fallback() -> None:
                 camera_position=update.camera_position,
             )
 
+            await client.disconnect()
+
             # Should have rendered something (even if mostly black)
             assert path is not None
             assert path.exists()
@@ -161,7 +164,5 @@ async def test_client_render_cpu_fallback() -> None:
             # Check metrics file
             metrics_path = Path(tmpdir, "frames", "metrics.jsonl")
             assert metrics_path.exists()
-
-            await client.disconnect()
     finally:
         await server.stop()
