@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/itec/emanuele/.agent-rules/scripts/session-status.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "/home/itec/emanuele/.agent-rules/scripts/guard-rm.py",
+              "--protected", "assets",
+              "--protected", "output",
+              "--detail", "3DGS PLY scenes / movement traces / weight symlinks / rendered frame + metrics outputs"
+            ],
+            "statusMessage": "Checking rm target..."
+          }
+        ]
+      }
+    ]
+  }
+}
