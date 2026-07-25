@@ -126,3 +126,15 @@ output/*
 
 
 .claude/worktrees/
+
+# Cross-agent project layout: real skills/agents under .claude/; .agents/
+# holds symlinks plus the workflows tree Cursor and Antigravity share.
+.agents/*
+!.agents/agents
+!.agents/skills
+!.agents/workflows
+!.agents/workflows/**
+
+# Claude Code: local permission grants are machine-specific, not shared
+.claude/settings.local.json
+.claude/worktrees/

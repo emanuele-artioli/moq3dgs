@@ -1,49 +1,45 @@
 #!/usr/bin/env python3
-"""Regenerate the non-Claude agent rule files from CLAUDE.md.
+"""Keep this project's agent rule files consistent with AGENTS.md.
 
-CLAUDE.md is the only rule file anyone edits by hand. Claude Code loads it
-(plus the host-wide ~/.claude/CLAUDE.md) automatically, but Antigravity,
-Copilot and generic AGENTS.md-reading agents each want their own file in
-their own location and format. Hand-maintaining those copies is what let
-this repo's rules drift apart, so they are generated instead.
+`AGENTS.md` at the repository root is the one file anyone edits by hand. It is
+read natively by Cursor, Antigravity, Copilot's cloud agent and code review,
+and Codex. Claude Code is the only holdout -- it reads `CLAUDE.md` and has no
+AGENTS.md fallback -- so `CLAUDE.md` is a thin wrapper that `@`-imports
+AGENTS.md and adds whatever is Claude-only.
 
-Generated files:
+This script maintains the three things that cannot be hand-written:
 
-    AGENTS.md                                      generic (Codex and friends)
-    .agents/rules/<project>.md                     Antigravity
-    .github/instructions/<project>.instructions.md Copilot
+    AGENTS.md `host-rules` block   host-wide rules, inlined for the agents
+                                   that cannot import them
+    .cursor/rules/cursor-harness.mdc  Cursor's own harness rules (Cursor has
+                                   no user-level rules file, so they have to
+                                   be delivered per project)
+    .github/copilot-instructions.md   a pointer, for the Copilot surfaces that
+                                   read nothing but this path
 
-Each generated file is this project's rules followed by the host-wide rules,
-because only Claude loads the host-wide file on its own.
+Why the host rules are inlined rather than imported: Claude Code and
+Antigravity load `~/.agent-rules/AGENTS.md` themselves, but Copilot's cloud
+agent and Cursor's cloud agents run on machines that have never seen this
+host's home directory. Anything they must obey has to be committed into the
+repository.
 
-The host-wide file lives outside the repo (`~/.claude/CLAUDE.md`) and so is
-not available on CI. `tools/host_rules_snapshot.md` is a tracked copy of it:
-generation always reads the snapshot, and the snapshot is refreshed from the
-real file whenever this script runs somewhere that has one. That keeps `--check`
-reproducible on a machine that has never seen the host file.
-
-`~/.claude/CLAUDE.md` may itself be (partly) a Claude Code `@`-import — it now
-just imports `~/.agent-rules/shared.md` for the host-wide prose. Since
-AGENTS.md/Antigravity/Copilot don't understand `@`-import syntax, any such
-line is resolved (the imported file's content substituted in) before the text
-is used anywhere, so the generated files always end up with real prose, never
-a raw unresolved `@/path` string.
+Why `--check` still works on CI: when `~/.agent-rules/AGENTS.md` is not
+reachable, the generated blocks are left exactly as committed instead of being
+regenerated from nothing. That is what replaced the old
+`tools/host_rules_snapshot.md`, which existed only to make CI reproducible and
+is now deleted on sight.
 
 Usage:
     python tools/sync_agent_rules.py            # write the generated files
     python tools/sync_agent_rules.py --check    # exit 1 if any is out of date
 
-Text between `<!-- claude-only:start -->` and `<!-- claude-only:end -->` is
-dropped from the generated files — use it for skill and subagent references
-that mean nothing outside Claude Code.
-
 CANONICAL COPY: this file is hand-edited only at
 ~/.agent-rules/scripts/sync_agent_rules.py and vendored (physically copied,
 not symlinked) into each project's tools/ directory by
 ~/.agent-rules/scripts/vendor-sync-agent-rules.sh. It cannot be centralized
-the way the hooks in this directory are (referenced by absolute path) because
-CI runners have no access to ~/.agent-rules/ at all — this script must stay a
-real, self-contained file inside each project's own repo. See
+the way the hooks are (referenced by absolute path) because CI runners have no
+access to ~/.agent-rules/ at all -- this script must stay a real,
+self-contained file inside each project's own repo. See
 ~/.agent-rules/README.md for the full explanation.
 """
 
@@ -55,40 +51,47 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HOST_RULES = Path.home() / ".claude" / "CLAUDE.md"
-HOST_SNAPSHOT = REPO_ROOT / "tools" / "host_rules_snapshot.md"
 
-CLAUDE_ONLY = re.compile(
-    r"[ \t]*<!--\s*claude-only:start\s*-->.*?<!--\s*claude-only:end\s*-->[ \t]*\n?",
+AGENTS_MD = REPO_ROOT / "AGENTS.md"
+CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+CURSOR_RULE = REPO_ROOT / ".cursor" / "rules" / "cursor-harness.mdc"
+COPILOT_MD = REPO_ROOT / ".github" / "copilot-instructions.md"
+
+HOST_DIR = Path.home() / ".agent-rules"
+HOST_RULES = HOST_DIR / "AGENTS.md"
+HOST_CURSOR_HARNESS = HOST_DIR / "harness" / "cursor.md"
+
+# Files the previous layout generated, now superseded. Antigravity reads the
+# root AGENTS.md natively since v1.20.3, and Copilot's cloud agent and code
+# review read it too, so a per-agent copy of the same prose is dead weight.
+OBSOLETE = (
+    REPO_ROOT / ".agents" / "rules",
+    REPO_ROOT / ".github" / "instructions",
+    REPO_ROOT / "tools" / "host_rules_snapshot.md",
+)
+
+HOST_BLOCK = re.compile(
+    r"\n*<!-- host-rules:start.*?<!-- host-rules:end -->\n?", re.DOTALL
+)
+COPILOT_CRITICAL = re.compile(
+    r"<!--\s*copilot-critical:start\s*-->(.*?)<!--\s*copilot-critical:end\s*-->",
     re.DOTALL,
 )
-
 IMPORT_LINE = re.compile(r"^@(/\S+)\s*$", re.MULTILINE)
-
-BANNER = (
-    "<!-- GENERATED from CLAUDE.md by tools/sync_agent_rules.py — DO NOT EDIT.\n"
-    "     Edit CLAUDE.md and re-run the script; a pre-commit hook checks this. -->"
-)
-
-
-def strip_claude_only(text: str) -> str:
-    return CLAUDE_ONLY.sub("", text)
 
 
 def resolve_imports(text: str, _depth: int = 0) -> str:
-    """Expand Claude Code `@/absolute/path` import lines, recursively.
+    """Expand `@/absolute/path` import lines, recursively.
 
-    A line consisting solely of `@` + an absolute path is Claude Code's own
-    import syntax for pulling in another file's content. Agents reading the
-    *generated* files (AGENTS.md, Antigravity, Copilot) don't understand
-    that syntax, so any such line is replaced with the referenced file's
-    actual content before use. Bounded to 4 hops, matching Claude Code's own
-    import-depth limit, so a cycle can't recurse forever.
+    The host rules file is meant to be a leaf with no imports of its own, but
+    if one is ever added, an unresolved `@/path` line inlined into a project
+    would be meaningless to every agent that does not speak Claude's import
+    syntax. Bounded to 4 hops, matching Claude Code's own limit.
     """
     if _depth >= 4:
         return text
 
-    def _expand(match: "re.Match[str]") -> str:
+    def _expand(match: re.Match[str]) -> str:
         path = Path(match.group(1))
         if not path.is_file():
             return match.group(0)
@@ -97,92 +100,124 @@ def resolve_imports(text: str, _depth: int = 0) -> str:
     return IMPORT_LINE.sub(_expand, text)
 
 
-def project_name() -> str:
-    """The project's name, from pyproject.toml rather than the directory.
-
-    The directory name is not stable: GitHub Actions checks this repo out as
-    `PointStream` while it is `pointstream` locally, which made the generated
-    filenames differ by case and failed `--check` on CI only.
-    """
-    pyproject = REPO_ROOT / "pyproject.toml"
-    if pyproject.is_file():
-        match = re.search(
-            r'^\s*name\s*=\s*["\']([^"\']+)["\']', pyproject.read_text(), re.MULTILINE
-        )
-        if match:
-            return match.group(1)
-    return REPO_ROOT.name.lower()
-
-
-def describe(claude_md: str) -> str:
-    """First paragraph after the title, collapsed to one line for frontmatter."""
-    body = claude_md.split("\n", 1)[1] if "\n" in claude_md else ""
-    for block in body.split("\n\n"):
-        block = block.strip()
-        if block and not block.startswith(("#", "<!--")):
-            one_line = " ".join(block.split())
-            return one_line[:300].replace('"', "'")
-    return f"Rules for the {project_name()} project"
-
-
-def host_rules() -> str:
-    """The tracked snapshot, refreshed from ~/.claude/CLAUDE.md when present.
-
-    Whichever source is used, any `@`-import line is resolved before the
-    text is returned — so the snapshot written by `targets()` below is
-    always the fully-expanded prose, never a raw import line, and CI's
-    fallback read of the snapshot never needs to resolve anything itself.
-    """
-    if HOST_RULES.is_file():
-        return resolve_imports(HOST_RULES.read_text())
-    if HOST_SNAPSHOT.is_file():
-        return HOST_SNAPSHOT.read_text()
-    return ""
-
-
-def compose(claude_md: str, host: str) -> str:
-    """Project rules + host-wide rules, with Claude-only passages removed."""
-    parts = [strip_claude_only(claude_md).strip()]
-    if host.strip():
-        text = strip_claude_only(host).strip()
-        # Demote the host file's headings so they nest under our own section.
-        text = re.sub(r"^#", "##", text, flags=re.MULTILINE)
-        parts.append(
-            "# Host-wide rules\n\n"
-            "These apply to every project on this host. Claude Code loads them\n"
-            "automatically; they are inlined here for agents that do not.\n\n" + text
-        )
-    return "\n\n---\n\n".join(parts) + "\n"
-
-
-def targets(claude_md: str, host: str) -> dict[Path, str]:
-    name = project_name()
-    body = compose(claude_md, host)
-    desc = describe(claude_md)
-
-    generic = f"{BANNER}\n\n{body}"
-
-    antigravity = (
-        "---\n"
-        "trigger: model_decision\n"
-        f"description: When working on {name}: {desc}\n"
-        "---\n\n"
-        f"{BANNER}\n\n{body}"
+def host_block() -> str | None:
+    """The generated host-rules block, or None when the host file is absent."""
+    if not HOST_RULES.is_file():
+        return None
+    text = resolve_imports(HOST_RULES.read_text()).strip()
+    # Demote the host file's headings so they nest under our own section.
+    text = re.sub(r"^#", "##", text, flags=re.MULTILINE)
+    return (
+        "<!-- host-rules:start — GENERATED from ~/.agent-rules/AGENTS.md by\n"
+        "     tools/sync_agent_rules.py. Do not edit inside this block; edit the\n"
+        "     host file and re-run the script. Everything above the marker is\n"
+        "     this project's own, hand-edited. -->\n\n"
+        "# Host-wide rules\n\n"
+        "These apply to every project on this host. Claude Code and Antigravity\n"
+        "load them from `~/.agent-rules/AGENTS.md` directly; they are inlined\n"
+        "here for the agents that cannot — notably cloud agents, which run on\n"
+        "machines that have never seen this host's home directory.\n\n"
+        f"{text}\n\n"
+        "<!-- host-rules:end -->"
     )
 
-    copilot = (
+
+def with_host_block(agents_md: str, block: str) -> str:
+    """AGENTS.md with its host-rules block replaced (or appended)."""
+    body = HOST_BLOCK.sub("\n", agents_md).rstrip()
+    return f"{body}\n\n{block}\n"
+
+
+def cursor_rule(harness: str) -> str:
+    """Cursor's harness rules as an always-applied project rule."""
+    return (
         "---\n"
-        "applyTo: '**'\n"
+        "description: Cursor-specific harness mechanics for this host\n"
+        "alwaysApply: true\n"
         "---\n\n"
-        f"{BANNER}\n\n{body}"
+        "<!-- GENERATED from ~/.agent-rules/harness/cursor.md by\n"
+        "     tools/sync_agent_rules.py — DO NOT EDIT. Cursor has no user-level\n"
+        "     rules file, so these have to be delivered per project. -->\n\n"
+        f"{harness.strip()}\n"
     )
 
-    return {
-        HOST_SNAPSHOT: host,
-        REPO_ROOT / "AGENTS.md": generic,
-        REPO_ROOT / ".agents" / "rules" / f"{name}.md": antigravity,
-        REPO_ROOT / ".github" / "instructions" / f"{name}.instructions.md": copilot,
-    }
+
+def copilot_pointer(agents_md: str) -> str:
+    """A pointer file for the Copilot surfaces that read nothing else.
+
+    Copilot's cloud agent and code review read `AGENTS.md` natively; Copilot
+    Chat in the IDE and on github.com read only this path. Rather than keep a
+    second full copy in sync, this points at the real file and repeats only
+    the handful of rules the project marks as must-not-break.
+    """
+    critical = COPILOT_CRITICAL.search(agents_md)
+    body = (
+        "<!-- GENERATED by tools/sync_agent_rules.py — DO NOT EDIT.\n"
+        "     Edit AGENTS.md and re-run the script. -->\n\n"
+        "# Copilot instructions\n\n"
+        "The authoritative instructions for this repository are in **`AGENTS.md`\n"
+        "at the repository root** — this project's own rules first, host-wide\n"
+        "rules in the `host-rules` block at the end. Copilot's cloud agent and\n"
+        "code review read that file directly. This file exists only for the\n"
+        "surfaces that do not: Copilot Chat in the IDE and on github.com.\n\n"
+        "**Read `AGENTS.md` before making any change.**\n"
+    )
+    if critical:
+        body += (
+            "\nThe rules below are repeated here because they are the ones that\n"
+            "cause real damage when missed — they are not the whole set.\n\n"
+            f"{critical.group(1).strip()}\n"
+        )
+    return body
+
+
+def targets() -> dict[Path, str]:
+    """Path -> intended content, for every file this script owns.
+
+    Files whose source is unreachable (no `~/.agent-rules/`, i.e. CI) are
+    omitted, so `--check` compares only what it can legitimately verify.
+    """
+    if not AGENTS_MD.is_file():
+        raise FileNotFoundError(AGENTS_MD)
+
+    agents_md = AGENTS_MD.read_text()
+    planned: dict[Path, str] = {}
+
+    block = host_block()
+    if block is not None:
+        agents_md = with_host_block(agents_md, block)
+        planned[AGENTS_MD] = agents_md
+
+    if HOST_CURSOR_HARNESS.is_file():
+        planned[CURSOR_RULE] = cursor_rule(HOST_CURSOR_HARNESS.read_text())
+
+    planned[COPILOT_MD] = copilot_pointer(agents_md)
+    return planned
+
+
+def obsolete_present() -> list[Path]:
+    return [path for path in OBSOLETE if path.exists()]
+
+
+def remove(path: Path) -> None:
+    if path.is_dir():
+        for child in sorted(path.rglob("*"), reverse=True):
+            child.rmdir() if child.is_dir() else child.unlink()
+        path.rmdir()
+    else:
+        path.unlink()
+
+
+def claude_wrapper_ok() -> bool:
+    """Whether CLAUDE.md still imports AGENTS.md.
+
+    Advisory. Claude Code reads no AGENTS.md of its own, so a CLAUDE.md that
+    has lost its `@AGENTS.md` line means Claude sessions silently run with no
+    project rules at all -- the exact failure this layout exists to prevent.
+    """
+    if not CLAUDE_MD.is_file():
+        return False
+    return "@AGENTS.md" in CLAUDE_MD.read_text()
 
 
 def main() -> int:
@@ -194,30 +229,44 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    source = REPO_ROOT / "CLAUDE.md"
-    if not source.is_file():
-        print(f"error: {source} not found", file=sys.stderr)
+    try:
+        planned = targets()
+    except FileNotFoundError as missing:
+        print(f"error: {missing} not found", file=sys.stderr)
         return 1
 
-    stale: list[Path] = []
-    for path, content in targets(source.read_text(), host_rules()).items():
-        current = path.read_text() if path.is_file() else None
-        if current == content:
-            continue
-        stale.append(path)
-        if not args.check:
+    stale = [
+        path
+        for path, content in planned.items()
+        if (path.read_text() if path.is_file() else None) != content
+    ]
+    dead = obsolete_present()
+
+    if args.check:
+        if stale or dead:
+            print("Agent rule files are out of date with AGENTS.md:", file=sys.stderr)
+            for path in stale:
+                print(f"  stale:    {path.relative_to(REPO_ROOT)}", file=sys.stderr)
+            for path in dead:
+                print(f"  obsolete: {path.relative_to(REPO_ROOT)}", file=sys.stderr)
+            print("Run: python tools/sync_agent_rules.py", file=sys.stderr)
+            return 1
+    else:
+        for path in stale:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+            path.write_text(planned[path])
+        for path in dead:
+            remove(path)
 
-    rel = [str(p.relative_to(REPO_ROOT)) for p in stale]
-    if args.check and stale:
-        print("Agent rule files are out of date with CLAUDE.md:", file=sys.stderr)
-        for name in rel:
-            print(f"  {name}", file=sys.stderr)
-        print("Run: python tools/sync_agent_rules.py", file=sys.stderr)
-        return 1
+    if not claude_wrapper_ok():
+        print(
+            "warning: CLAUDE.md does not import AGENTS.md — Claude Code sessions "
+            "will load no project rules. Add `@AGENTS.md` to CLAUDE.md.",
+            file=sys.stderr,
+        )
 
-    print(f"agent rules: {len(rel)} file(s) updated" if rel else "agent rules: up to date")
+    changed = len(stale) + len(dead)
+    print(f"agent rules: {changed} file(s) updated" if changed else "agent rules: up to date")
     return 0
 
 

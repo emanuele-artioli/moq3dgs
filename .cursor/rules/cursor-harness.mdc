@@ -1,0 +1,138 @@
+---
+description: Cursor-specific harness mechanics for this host
+alwaysApply: true
+---
+
+<!-- GENERATED from ~/.agent-rules/harness/cursor.md by
+     tools/sync_agent_rules.py — DO NOT EDIT. Cursor has no user-level
+     rules file, so these have to be delivered per project. -->
+
+# Cursor harness rules
+
+Cursor-specific mechanics, to sit alongside the tool-agnostic host rules in
+`../AGENTS.md`.
+
+**How this file reaches Cursor.** Cursor has no user-level rules file — a
+`~/.cursor/rules/` directory is *not* read (confirmed against Cursor's docs
+and its own forum: global `.mdc` support does not exist), and User Rules live
+only in Settings → Rules as plain text synced to the account. So this file is
+delivered per project as a generated `.cursor/rules/cursor-harness.mdc` with
+`alwaysApply: true`. Host-wide prose arrives separately, through the
+`host-rules` block inside each project's `AGENTS.md`, which Cursor reads
+natively.
+
+## Shell calls on this host are expensive — prefer the file tools
+
+Observed 2026-07-25: three unrelated `Shell` calls (`ls -la` on five
+directories, `git ls-files`, a `mv` plus two `ln -s`) each took 480–500 s.
+The near-identical timings point at fixed per-call overhead rather than the
+work itself, but the cause has **not** been diagnosed — treat the cost as
+real and unexplained rather than assuming a slow command.
+
+Consequences worth internalising:
+
+- Use `Read`, `Glob`, and `Grep` instead of `cat`, `head`, `tail`, `ls`,
+  `find`, and `rg`. They are fast here and are the documented preference
+  anyway.
+- Use `StrReplace`/`Write` instead of `sed`/`awk`/heredocs.
+- When shell is genuinely required (git, conda, running a job), **batch every
+  command into a single call** chained with `&&`. Ten one-liners is over an
+  hour of wall clock.
+- Budget `block_until_ms` accordingly: a call that "should" take two seconds
+  can still need minutes before it returns.
+
+## Waiting for long-running commands — never hand-roll a waiter
+
+⛔ **Never write `until ! pgrep -f <pattern>; do sleep N; done` (or any
+self-written poll loop) to wait for a job.** The command runs via
+`bash -c "<the whole command string>"`, so the string *contains* the pattern
+and `pgrep -f` matches the watcher's own process — the condition never becomes
+true, the job finishes unnoticed, and the loop spins until timeout. This has
+burned over an hour of wall clock on this host more than once, under more than
+one agent. `guard-wait-loop.py` blocks the pattern at the
+`beforeShellExecution` hook.
+
+There is nothing to poll for, because Cursor already reports completion:
+
+- **Finishes inside the block window** → plain `Shell` with `block_until_ms`
+  sized to the expected runtime plus a generous buffer (see the slow-shell
+  note above).
+- **Longer than that** → `Shell` with `block_until_ms: 0`. It detaches,
+  streams into a terminal file, and **notifies on completion at the end of the
+  turn**. Do one status check afterwards to confirm it actually started, then
+  get on with other work.
+- **Need to block on the result because nothing else can proceed** →
+  `AwaitShell` with that `shell_id`, sizing `block_until_ms` to the expected
+  remaining runtime, optionally with `pattern` to return early on a known
+  success or failure line.
+- **Need progress while it runs** → `notify_on_output` with a pattern that
+  matches failure signatures too (`Traceback|Error|FAILED|Killed|OOM`), not
+  just the success marker. A success-only pattern stays silent through a crash,
+  and silence is indistinguishable from "still running."
+
+Do **not** poll a backgrounded job reflexively. `AwaitShell` is for the case
+where the next step is genuinely blocked, or where the job needs close
+monitoring (training runs, long migrations) — not as a habit.
+
+Terminal files under `.cursor/projects/<workspace>/terminals/<id>.txt` carry
+the live output plus a header (`pid`, `cwd`, `running_for_ms`) and, once
+finished, a footer (`exit_code`, `elapsed_ms`). Read that file rather than
+re-running the command.
+
+`conda run -n <env> …` is not a completion-waiting strategy. Without
+`--no-capture-output` it buffers everything until exit, so a long job shows
+nothing and then hits the block deadline. Use it for env activation only.
+
+## Subagents
+
+`Task` subagents each get their own context window. Use `explore` for broad
+codebase questions, and the project's own registered agents (`gpu-job-runner`,
+`paper-editor`, and whatever a project adds) for the jobs they were written
+for. A background subagent notifies on completion — never `AwaitShell` or
+sleep waiting for one.
+
+Split genuinely independent workstreams across parallel subagents in one
+message, per the host-wide plan-mode rule; keep sequential work in one agent.
+
+Global SoT agents live in `../agents/<name>.agent.md` and are linked into
+`~/.cursor/agents/<name>.md` by `../scripts/install.py`. Project agents stay
+real under `.claude/agents/` with `.cursor/agents` → symlink (same pattern as
+`.agents/agents`). Claude-oriented `tools:` frontmatter on those files is
+ignored here — Cursor uses its own tool set; keep the prompt body tool-agnostic.
+
+## Slash commands
+
+Plain markdown under `~/.cursor/commands/<name>.md` (global) or
+`.cursor/commands/<name>.md` (project). Filename = `/name`. Host-wide prompts
+are authored once in `../workflows/` and linked by `install.py`. Project
+prompts live in `.agents/workflows/` with `.cursor/commands` → symlink so
+Antigravity and Cursor share one tree. Prefer a skill over a command when the
+workflow should also auto-trigger from a description match.
+
+## Where Cursor's own config lives
+
+- Prose: project `AGENTS.md` (root and nested, always-on) and project
+  `CLAUDE.md` (also always applied, for Claude Code compatibility).
+  `.cursor/rules/*.mdc` adds frontmatter control — `alwaysApply`, `globs`,
+  description-based selection — that plain `AGENTS.md` cannot express.
+- Skills: Cursor reads `.cursor/skills/`, `.agents/skills/`, `.claude/skills/`
+  and `.codex/skills/` per project, and the same four under `~/`. The host's
+  global skills therefore already reach Cursor through `~/.claude/skills/` —
+  no Cursor-specific skill copy is needed.
+- Subagents: `~/.cursor/agents/` and `.cursor/agents/` are the native paths;
+  `.claude/agents/` is also read as a compatibility path.
+- Commands: `~/.cursor/commands/` and `.cursor/commands/`.
+- MCP: `~/.cursor/mcp.json` and `.cursor/mcp.json`. Shared servers come from
+  `../mcp/catalog.json` via `install.py`; marketplace plugin MCPs stay local.
+- Hooks: `~/.cursor/hooks.json` (paths relative to `~/.cursor/`) and
+  `.cursor/hooks.json` (paths relative to the project root). Events are
+  lowerCamel (`beforeShellExecution`, `afterFileEdit`, `preToolUse`, `stop`,
+  …). A command hook reads JSON on stdin and answers with JSON on stdout —
+  `{"permission": "allow" | "ask" | "deny", "user_message": …,
+  "agent_message": …}` — which is a *different contract* from Claude's
+  `hookSpecificOutput` block, so each platform needs its own thin adapter over
+  the shared guard logic in `../scripts/guardlib/`. Verified payload fields for
+  `beforeShellExecution`: top-level `command`, empty `cwd`, project root in
+  `workspace_roots`.
+- `~/.cursor/skills-cursor/` is Cursor's own managed directory. Never edit or
+  vendor anything into it.

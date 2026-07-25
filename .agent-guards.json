@@ -1,0 +1,9 @@
+{
+  "_comment": "Per-project values for the host-wide shell guards in ~/.agent-rules/scripts/. Read by every agent's hook adapter; see .agent-rules/README.md.",
+  "protected": [
+    "assets",
+    "output"
+  ],
+  "detail": "3DGS PLY scenes / movement traces / weight symlinks / rendered frame + metrics outputs",
+  "entry_points": []
+}
