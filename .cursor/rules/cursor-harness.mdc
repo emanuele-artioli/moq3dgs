@@ -100,6 +100,23 @@ real under `.claude/agents/` with `.cursor/agents` → symlink (same pattern as
 `.agents/agents`). Claude-oriented `tools:` frontmatter on those files is
 ignored here — Cursor uses its own tool set; keep the prompt body tool-agnostic.
 
+## Model family
+
+Prefer **omitting `model` on `Task`** so the subagent inherits the parent
+session (this host’s in-house Cursor models: Grok / Composer). Do not pin
+versioned slugs in prompts — they go stale. If you must pass a model, use
+only the Grok or Composer family.
+
+Never pass Claude / GPT (or other off-family) models because a skill table
+said so. The Cursor marketplace **pstack** plugin’s multi-family defaults
+(`/setup-pstack`, arena / interrogate panels) ignore which IDE you are on
+and are **untrusted** here — do not follow them. `before-task.py` on
+`preToolUse`/`Task` and `subagentStart` hard-denies off-family spawns.
+
+If in-house models are clearly struggling, ask the user; prefer switching
+platform/session over silently crossing family. Settings hygiene: Explore
+subagent model → inherit or in-house; Fast mode can force cheaper variants.
+
 ## Slash commands
 
 Plain markdown under `~/.cursor/commands/<name>.md` (global) or
@@ -136,3 +153,28 @@ workflow should also auto-trigger from a description match.
   `workspace_roots`.
 - `~/.cursor/skills-cursor/` is Cursor's own managed directory. Never edit or
   vendor anything into it.
+
+## Knowledge loop (Cursor)
+
+- Host SoT: `../candidates/`, skills `end-of-session`, `evaluate-candidates`,
+  `handoff`. SessionStart runs `scripts/cursor/session-start.py` (pending-
+  verification + open candidates reminders via `additional_context` + stderr;
+  side-channel `~/.cursor/session-start.log` because Cursor may drop
+  `additional_context` on a known IDE race).
+- Progressive nudges (never force mid-task handoff): `beforeSubmitPrompt`
+  (soft/log), `stop` (medium/stderr), `preCompact` (`user_message` strong).
+  Shared policy in `../scripts/context_nudge.py`. Prefer handoff before
+  auto-compact; context rot often starts ~50% fill. Live probe: `stop` does
+  **not** carry `context_usage_percent` (see `~/.cursor/stop-probe.log`);
+  medium nudges use the stop-count proxy. `stop` still appends payload keys
+  to the probe log in case that changes.
+- Architecture diagrams: `../scripts/render_architecture.py` (`--check`
+  freshness gate, standalone from `install.py`).
+- Enforceable rules register: `../enforceable-rules.md`. Soft plan-wave
+  linter: `../scripts/lint_plan_waves.py` (CLI + advisory from `stop` for
+  plans touched in the last 7 days). Soft task-change stays log-only.
+- `end-of-session`: invoke = commit consent; ask before push. Conditionally
+  runs handoff as a step.
+- Platform write-ownership: do not claim Claude/Antigravity hooks verified
+  from here; leave tickets under `../candidates/pending-verification/`.
+  Pickup docs: `HANDOFF-claude.md`, `HANDOFF-antigravity.md` at repo root.

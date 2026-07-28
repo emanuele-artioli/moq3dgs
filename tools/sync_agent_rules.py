@@ -7,7 +7,7 @@ and Codex. Claude Code is the only holdout -- it reads `CLAUDE.md` and has no
 AGENTS.md fallback -- so `CLAUDE.md` is a thin wrapper that `@`-imports
 AGENTS.md and adds whatever is Claude-only.
 
-This script maintains the three things that cannot be hand-written:
+This script maintains everything that cannot be hand-written:
 
     AGENTS.md `host-rules` block   host-wide rules, inlined for the agents
                                    that cannot import them
@@ -16,12 +16,34 @@ This script maintains the three things that cannot be hand-written:
                                    be delivered per project)
     .github/copilot-instructions.md   a pointer, for the Copilot surfaces that
                                    read nothing but this path
+    .claude/project-core.md        AGENTS.md minus the host block and minus
+                                   every path-scoped section; what CLAUDE.md
+                                   imports
+    .claude/rules/<slug>.md        one per path-scoped section, deferred by
+                                   `paths:` frontmatter
+    .github/instructions/<slug>.instructions.md
+                                   the same sections for Copilot Chat,
+                                   deferred by `applyTo:` frontmatter
 
 Why the host rules are inlined rather than imported: Claude Code and
 Antigravity load `~/.agent-rules/AGENTS.md` themselves, but Copilot's cloud
 agent and Cursor's cloud agents run on machines that have never seen this
 host's home directory. Anything they must obey has to be committed into the
 repository.
+
+Why AGENTS.md is complete but Claude's copy is split (the `scope:` markers):
+AGENTS.md stays the whole rule set in one file because Cursor, Codex,
+Antigravity and Copilot's cloud agent read it eagerly and have no way to defer
+part of it. Claude and Copilot Chat *do* have a way -- `paths:` and `applyTo:`
+frontmatter -- so a section that only matters when touching `src/` is
+delivered to them as a rule file that loads on demand instead of costing
+context in every session. Same source, same intent; only the moment of
+delivery differs. Mark a section by putting
+
+    <!-- scope: src/**, tests/** -->
+
+immediately above its `## ` heading in AGENTS.md. Sections with no marker are
+always-on for everyone.
 
 Why `--check` still works on CI: when `~/.agent-rules/AGENTS.md` is not
 reachable, the generated blocks are left exactly as committed instead of being
@@ -49,13 +71,20 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 AGENTS_MD = REPO_ROOT / "AGENTS.md"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
+CLAUDE_CORE = REPO_ROOT / ".claude" / "project-core.md"
+CLAUDE_RULES = REPO_ROOT / ".claude" / "rules"
 CURSOR_RULE = REPO_ROOT / ".cursor" / "rules" / "cursor-harness.mdc"
 COPILOT_MD = REPO_ROOT / ".github" / "copilot-instructions.md"
+COPILOT_RULES = REPO_ROOT / ".github" / "instructions"
+
+# What CLAUDE.md must import for a Claude session to see this project's rules.
+CLAUDE_IMPORT = "@.claude/project-core.md"
 
 HOST_DIR = Path.home() / ".agent-rules"
 HOST_RULES = HOST_DIR / "AGENTS.md"
@@ -64,9 +93,10 @@ HOST_CURSOR_HARNESS = HOST_DIR / "harness" / "cursor.md"
 # Files the previous layout generated, now superseded. Antigravity reads the
 # root AGENTS.md natively since v1.20.3, and Copilot's cloud agent and code
 # review read it too, so a per-agent copy of the same prose is dead weight.
+# `.github/instructions/` is deliberately NOT here any more: it came back with
+# a different job, carrying only the path-scoped sections under `applyTo:`.
 OBSOLETE = (
     REPO_ROOT / ".agents" / "rules",
-    REPO_ROOT / ".github" / "instructions",
     REPO_ROOT / "tools" / "host_rules_snapshot.md",
 )
 
@@ -78,6 +108,21 @@ COPILOT_CRITICAL = re.compile(
     re.DOTALL,
 )
 IMPORT_LINE = re.compile(r"^@(/\S+)\s*$", re.MULTILINE)
+SCOPE_MARKER = re.compile(r"^<!--\s*scope:\s*(?P<globs>[^>]+?)\s*-->[ \t]*$", re.MULTILINE)
+SECTION_HEADING = re.compile(r"^## .+$", re.MULTILINE)
+
+# Every file this script writes carries this, so a generated rule file that no
+# longer corresponds to a `scope:` marker can be recognised and swept.
+BANNER = "GENERATED — DO NOT EDIT. Source: AGENTS.md via tools/sync_agent_rules.py"
+
+
+class Scoped(NamedTuple):
+    """One `## ` section of AGENTS.md that only applies to matching files."""
+
+    slug: str
+    title: str
+    globs: tuple[str, ...]
+    body: str
 
 
 def resolve_imports(text: str, _depth: int = 0) -> str:
@@ -126,6 +171,114 @@ def with_host_block(agents_md: str, block: str) -> str:
     """AGENTS.md with its host-rules block replaced (or appended)."""
     body = HOST_BLOCK.sub("\n", agents_md).rstrip()
     return f"{body}\n\n{block}\n"
+
+
+def slugify(title: str) -> str:
+    """A filename stem from a section heading."""
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug or "section"
+
+
+def split_scoped(body: str) -> tuple[str, list[Scoped]]:
+    """Split project rules into the always-on core and the path-scoped sections.
+
+    A section is scoped by a `<!-- scope: glob, glob -->` comment sitting on its
+    own line immediately above a `## ` heading; it runs to the next `## `
+    heading or the end of the text. The marker and its section are cut out of
+    the core, which is what Claude loads in every session.
+    """
+    core = body
+    scoped: list[Scoped] = []
+    cuts: list[tuple[int, int]] = []
+
+    for marker in SCOPE_MARKER.finditer(body):
+        heading = SECTION_HEADING.search(body, marker.end())
+        if heading is None or body[marker.end() : heading.start()].strip():
+            raise ValueError(
+                f"scope marker at offset {marker.start()} is not immediately "
+                "above a '## ' heading; move it or drop it"
+            )
+        following = SECTION_HEADING.search(body, heading.end())
+        end = following.start() if following else len(body)
+        # Stop at the next scope marker too, not just the next heading: when two
+        # scoped sections are adjacent the marker sits *above* the heading, so
+        # ending at the heading would swallow the next section's marker into
+        # this one's body and make the two cut ranges overlap -- which silently
+        # ate an unrelated heading from the core.
+        next_marker = SCOPE_MARKER.search(body, heading.end())
+        if next_marker is not None and next_marker.start() < end:
+            end = next_marker.start()
+        title = body[heading.start() : heading.end()].lstrip("# ").strip()
+        globs = tuple(
+            glob.strip() for glob in marker.group("globs").split(",") if glob.strip()
+        )
+        if not globs:
+            raise ValueError(f"scope marker above '{title}' lists no globs")
+        scoped.append(
+            Scoped(
+                slug=slugify(title),
+                title=title,
+                globs=globs,
+                body=body[heading.start() : end].strip(),
+            )
+        )
+        cuts.append((marker.start(), end))
+
+    for start, end in reversed(cuts):
+        core = core[:start] + core[end:]
+    return re.sub(r"\n{3,}", "\n\n", core).strip() + "\n", scoped
+
+
+def claude_core(core: str, scoped: list[Scoped]) -> str:
+    """The always-on slice of the project rules, for CLAUDE.md to import."""
+    pointer = ""
+    if scoped:
+        listed = "\n".join(
+            f"- **{item.title}** — loads when you touch `{'`, `'.join(item.globs)}`"
+            for item in scoped
+        )
+        pointer = (
+            "\n## Rules that load on demand\n\n"
+            "These sections of `AGENTS.md` are not in this file. They arrive "
+            "automatically the moment you read a file they cover, so you do not "
+            "need to fetch them by hand — but if you are reasoning about one of "
+            "these areas *without* opening its files, read the matching file "
+            "under `.claude/rules/` first.\n\n"
+            f"{listed}\n"
+        )
+    return (
+        f"<!-- {BANNER}\n"
+        "     AGENTS.md minus two things a Claude session gets elsewhere: the\n"
+        "     host-rules block (already loaded from ~/.claude/CLAUDE.md) and\n"
+        "     every `scope:`-marked section (delivered on demand via\n"
+        "     .claude/rules/). CLAUDE.md imports this instead of AGENTS.md so a\n"
+        "     session pays context only for what it needs every time. -->\n\n"
+        f"{core}{pointer}"
+    )
+
+
+def claude_rule(item: Scoped) -> str:
+    """One path-scoped section as a Claude project rule."""
+    globs = "\n".join(f'  - "{glob}"' for glob in item.globs)
+    return (
+        f"---\npaths:\n{globs}\n---\n\n"
+        f"<!-- {BANNER}\n"
+        f"     The '{item.title}' section. Scoped so it costs no context until\n"
+        "     Claude reads a file it actually governs. -->\n\n"
+        f"{item.body}\n"
+    )
+
+
+def copilot_rule(item: Scoped) -> str:
+    """The same section for Copilot Chat, which scopes with `applyTo:`."""
+    return (
+        f'---\napplyTo: "{",".join(item.globs)}"\n---\n\n'
+        f"<!-- {BANNER}\n"
+        f"     The '{item.title}' section. Copilot's cloud agent and code review\n"
+        "     read the whole of AGENTS.md; this copy is for Copilot Chat, which\n"
+        "     reads only .github/. -->\n\n"
+        f"{item.body}\n"
+    )
 
 
 def cursor_rule(harness: str) -> str:
@@ -192,7 +345,32 @@ def targets() -> dict[Path, str]:
         planned[CURSOR_RULE] = cursor_rule(HOST_CURSOR_HARNESS.read_text())
 
     planned[COPILOT_MD] = copilot_pointer(agents_md)
+
+    # The tiered delivery. Split what a project hand-wrote -- never the host
+    # block, which Claude already has from ~/.claude/CLAUDE.md and which is
+    # dropped from the core slice for exactly that reason.
+    core, scoped = split_scoped(HOST_BLOCK.sub("\n", agents_md).rstrip() + "\n")
+    planned[CLAUDE_CORE] = claude_core(core, scoped)
+    for item in scoped:
+        planned[CLAUDE_RULES / f"{item.slug}.md"] = claude_rule(item)
+        planned[COPILOT_RULES / f"{item.slug}.instructions.md"] = copilot_rule(item)
     return planned
+
+
+def orphans(planned: dict[Path, str]) -> list[Path]:
+    """Generated rule files whose `scope:` marker is gone from AGENTS.md.
+
+    Only files carrying the banner are swept, so a hand-written rule dropped
+    into either directory is left alone.
+    """
+    found: list[Path] = []
+    for directory in (CLAUDE_RULES, COPILOT_RULES):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*.md")):
+            if path not in planned and BANNER in path.read_text():
+                found.append(path)
+    return found
 
 
 def obsolete_present() -> list[Path]:
@@ -209,15 +387,17 @@ def remove(path: Path) -> None:
 
 
 def claude_wrapper_ok() -> bool:
-    """Whether CLAUDE.md still imports AGENTS.md.
+    """Whether CLAUDE.md still imports the generated core slice.
 
     Advisory. Claude Code reads no AGENTS.md of its own, so a CLAUDE.md that
-    has lost its `@AGENTS.md` line means Claude sessions silently run with no
-    project rules at all -- the exact failure this layout exists to prevent.
+    has lost its import line means Claude sessions silently run with no project
+    rules at all -- the exact failure this layout exists to prevent. A plain
+    `@AGENTS.md` also counts: it is the pre-tiering layout, correct but
+    expensive, and worth flagging rather than failing.
     """
     if not CLAUDE_MD.is_file():
         return False
-    return "@AGENTS.md" in CLAUDE_MD.read_text()
+    return CLAUDE_IMPORT in CLAUDE_MD.read_text()
 
 
 def main() -> int:
@@ -234,13 +414,16 @@ def main() -> int:
     except FileNotFoundError as missing:
         print(f"error: {missing} not found", file=sys.stderr)
         return 1
+    except ValueError as bad_marker:
+        print(f"error: AGENTS.md: {bad_marker}", file=sys.stderr)
+        return 1
 
     stale = [
         path
         for path, content in planned.items()
         if (path.read_text() if path.is_file() else None) != content
     ]
-    dead = obsolete_present()
+    dead = obsolete_present() + orphans(planned)
 
     if args.check:
         if stale or dead:
@@ -260,8 +443,9 @@ def main() -> int:
 
     if not claude_wrapper_ok():
         print(
-            "warning: CLAUDE.md does not import AGENTS.md — Claude Code sessions "
-            "will load no project rules. Add `@AGENTS.md` to CLAUDE.md.",
+            f"warning: CLAUDE.md does not import `{CLAUDE_IMPORT}` — Claude Code "
+            "sessions will load no project rules, or will load the whole of "
+            "AGENTS.md including the host block it already has.",
             file=sys.stderr,
         )
 
