@@ -255,6 +255,17 @@ code runs: an experiment whose result violates what the paper asserts should
 fail loudly and be marked uncitable, rather than being caught later by a
 careful human reading a table.
 
+### Experiment results — bound before believing
+
+Before launching a run or reading its headline metrics, state a **plausible
+worst-case and best-case** for each (one-line basis: prior runs, paper
+baselines, metric bounds, trivial baselines). Write the bounds *before*
+looking at the number. A result outside that range is an **alarm**:
+investigate implementation / eval / data bugs first; do not report it as a
+clean finding or cite it until the alarm is closed or the bounds are
+explicitly revised with a reason. Procedure lives in `results-report` /
+`gpu-job-runner`.
+
 ### Long jobs must checkpoint at least hourly
 
 SSH here drops a couple of times a day. Any job expected to run over an hour
